@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="{{ name }}">
+    <link name="sphere_base">
+      <inertial>
+        <mass> {{ mass }} </mass>
+        <inertia>
+          <ixx> {{ inertia }} </ixx>
+          <iyy> {{ inertia }} </iyy>
+          <izz> {{ inertia }} </izz>
+        </inertia>
+      </inertial>
+      <visual name="sphere_base_vis">
+        <geometry>
+          <sphere>
+            <radius> {{ R }} </radius>
+          </sphere>
+        </geometry>
+        <material>
+          <diffuse> {{ rgba }} </diffuse>
+        </material>
+      </visual>
+      <collision name="sphere_base_col">
+        <geometry>
+          <sphere>
+            <radius> {{ R }} </radius>
+          </sphere>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

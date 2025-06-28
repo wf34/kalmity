@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from multiprocessing import Process
+import sys
 import typing
 import time
 import os
@@ -9,10 +10,19 @@ import re
 import subprocess
 import random
 from tap import Tap
+import numpy as np
 
 from pydrake.all import (
     StartMeshcat,
+    DiagramBuilder,
+    AddMultibodyPlantSceneGraph,
+    Parser,
+    RigidTransform,
+    MeshcatVisualizer,
+    Simulator,
 )
+
+SIM_DELTA_T = 1.e-3
 
 def raise_browser_for_meshcat(browser, target_url, comm_filename):
     print(f'Meshcat is now available at {target_url}')
@@ -74,13 +84,58 @@ def open_browser_link(replay_browser, meshcat_web_url):
 
 
 class SimArgs(Tap):
+    spheres_count: int = 100
+    volume: typing.List[typing.List[float]] = [[0, 0, 0], [10, 5, 5]]
     replay_browser: str = 'chromium'
+    seed: int = 34
+
+
+def make_sphere(parser, id_, R=0.01, mass=0.1, color=[0.8, 0.2, 0.2, 1.0]):
+    inertia = .4 * mass * R ** 2
+    sphere_str = None
+    with open(os.path.join(os.path.dirname(sys.argv[0]), 'sphere_sdf.template'), 'r') as the_file:
+        sphere_template = the_file.read()
+        sphere_str = sphere_template \
+            .replace('{{ name }}', id_) \
+            .replace('{{ mass }}', str(mass)) \
+            .replace('{{ inertia }}', str(inertia)) \
+            .replace('{{ R }}', str(R)) \
+            .replace('{{ rgba }}', ' '.join(map(str, color))) \
+
+    if sphere_str is None:
+        raise Exception('unreachable')
+
+    return parser.AddModelsFromString(sphere_str, "sdf")[0]
 
 
 def run_sim(args: SimArgs):
+    np.random.seed(args.seed)
+
+
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
+    parser = Parser(plant, scene_graph)
+
+    for id_ in range(args.spheres_count):
+        sphere_model = make_sphere(parser, f'sphr_{id_:04d}')
+        sphere_body = plant.GetBodyByName("sphere_base", sphere_model)
+        position = np.random.uniform(low=args.volume[0], high=args.volume[1])
+        plant.WeldFrames(
+            plant.world_frame(),
+            sphere_body.body_frame(),
+            RigidTransform(position)
+        )
+
+    plant.Finalize()
+
     meshcat = StartMeshcat()
-    meshcat.PublishRecording()
+    visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+    diagram = builder.Build()
+    context = diagram.CreateDefaultContext()
+    simulator = Simulator(diagram, context)
+    simulator.AdvanceTo(3.0)
     open_browser_link(args.replay_browser, meshcat.web_url())
+
 
 if '__main__' == __name__:
     run_sim(SimArgs().parse_args())
