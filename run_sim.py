@@ -9,8 +9,11 @@ import string
 import re
 import subprocess
 import random
-from tap import Tap
+
 import numpy as np
+
+from pydot import graph_from_dot_data
+from tap import Tap
 
 from pydrake.all import (
     StartMeshcat,
@@ -74,7 +77,6 @@ def open_browser_link(replay_browser, meshcat_web_url):
     time_at_detach = time.time()
     load_finished = False
     while time.time() - time_at_detach < 20. and not load_finished:
-        print('.')
         if os.path.exists(comm_filename):
             with open(comm_filename, 'r') as the_file:
                 status = int(the_file.read().strip())
@@ -88,6 +90,7 @@ class SimArgs(Tap):
     volume: typing.List[typing.List[float]] = [[0, 0, 0], [10, 5, 5]]
     replay_browser: str = 'chromium'
     seed: int = 34
+    diagram_destination: str = 'sim_diagram.png'
 
 
 def make_sphere(parser, id_, R=0.01, mass=0.1, color=[0.8, 0.2, 0.2, 1.0]):
@@ -131,6 +134,8 @@ def run_sim(args: SimArgs):
     meshcat = StartMeshcat()
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
+    graph_from_dot_data(diagram.GetGraphvizString(max_depth=4))[0].write_png(args.diagram_destination)
+
     context = diagram.CreateDefaultContext()
     simulator = Simulator(diagram, context)
     simulator.AdvanceTo(3.0)
