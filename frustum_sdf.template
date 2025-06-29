@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="{{ name }}">
+    <link name="base_link">
+      <inertial>
+        <mass> {{ mass }} </mass>
+        <inertia>
+          <ixx> {{ inertia_x }} </ixx>
+          <iyy> {{ inertia_y }} </iyy>
+          <izz> {{ inertia_z }} </izz>
+        </inertia>
+      </inertial>
+      <visual name="frustum_base_vis">
+        <geometry>
+          <mesh>
+            <uri>file://{{ obj_path }}</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <diffuse> {{ rgba }} </diffuse>
+        </material>
+      </visual>
+      <collision name="frustum_base_col">
+        <geometry>
+          <mesh>
+            <uri>file://{{ obj_path }}</uri>
+          </mesh>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
