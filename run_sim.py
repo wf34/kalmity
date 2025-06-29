@@ -16,6 +16,8 @@ from pydot import graph_from_dot_data
 from tap import Tap
 
 from pydrake.all import (
+    AbstractValue,
+    LeafSystem,
     StartMeshcat,
     DiagramBuilder,
     AddMultibodyPlantSceneGraph,
@@ -25,7 +27,9 @@ from pydrake.all import (
     MeshcatVisualizer,
     Simulator,
     PiecewisePolynomial,
+    PiecewiseQuaternionSlerp,
     TrajectorySource,
+    Quaternion,
 )
 
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
@@ -51,12 +55,12 @@ def raise_browser_for_meshcat(browser, target_url, comm_filename):
         if line:
             match = pattern.search(line)
             if match:
-                print(f"Pattern matched: {line}")
+                print(f'Pattern matched: {line}')
                 with open(comm_filename, 'w') as the_file:
                     the_file.write('1')
 
 def detachify(func):
-    """Decorate a function so that its calls are async in a detached process."""
+    '''Decorate a function so that its calls are async in a detached process.'''
 
     # create a process fork and run the function
     def forkify(*args, **kwargs):
@@ -116,7 +120,7 @@ def make_sphere(parser, id_, R=0.03, mass=0.1, color=[0.8, 0.2, 0.2, 1.0]):
     if sphere_str is None:
         raise Exception('unreachable')
 
-    return parser.AddModelsFromString(sphere_str, "sdf")[0]
+    return parser.AddModelsFromString(sphere_str, 'sdf')[0]
 
 
 def calculate_rect_frustum_inertia(mass, bottom_width, top_width, aspect_ratio, height):
@@ -131,7 +135,7 @@ def calculate_rect_frustum_inertia(mass, bottom_width, top_width, aspect_ratio, 
            c * (bw**2 + bw*tw + tw**2 + bh**2 + bh*th + th**2)
 
 
-def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, .5]):
+def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0]):
     mass = 1.
     bottom_width = .2
     top_width = .02
@@ -157,7 +161,7 @@ def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, .5]):
     if frustum_str is None:
         raise Exception('unreachable')
 
-    return parser.AddModelsFromString(frustum_str, "sdf")[0]
+    return parser.AddModelsFromString(frustum_str, 'sdf')[0]
 
 
 def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform, scale: np.array):
@@ -169,8 +173,8 @@ def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform,
         theta = 2 * np.pi * t / duration
 
         # Lemniscate of Bernoulli
-        x = scale[0] * np.sin(theta)
-        y = scale[1] * np.sin(theta) * np.cos(theta)
+        x = scale[0] * np.sin(theta) / 2
+        y = scale[1] * np.sin(theta) * np.cos(theta) / 2
         z = 0.
 
         positions.append([x, y, z, 1])
@@ -186,6 +190,76 @@ def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform,
 
     return trajectory
 
+def quaternion_from_vectors(source, target):
+
+    a = source / np.linalg.norm(source)
+    b = target / np.linalg.norm(target)
+
+    dot = np.dot(a, b)
+
+    if dot >= 1.0:
+        # Vectors are the same
+        return Quaternion.Identity()
+    elif dot <= -1.0:
+        # Vectors are opposite
+        # Find perpendicular axis
+        if abs(a[0]) < 0.9:
+            axis = np.cross(a, [1, 0, 0])
+        else:
+            axis = np.cross(a, [0, 1, 0])
+        axis = axis / np.linalg.norm(axis)
+        return Quaternion(w=0, x=axis[0], y=axis[1], z=axis[2])
+
+    # General case
+    cross = np.cross(a, b)
+    w = 1.0 + dot
+    arr = np.array([w] + cross.tolist())
+    arr /= np.linalg.norm(arr)
+    w, x,y,z = arr.tolist()
+    return Quaternion(w=w, x=x, y=y, z=z)
+
+
+def make_circular_roto_trajectory(duration: float):
+    model_lookvec = np.array([0, 0, -1])
+
+    origin_lookvec = np.array([0, 1, 0])
+    half_motion_lookvec = origin_lookvec * -1
+    quat_lookvec = [-1, 0, 0]
+    three_quat_lookvec = [1, 0, 0]
+    steps = 4
+    vecs = [origin_lookvec, quat_lookvec, half_motion_lookvec, three_quat_lookvec, origin_lookvec]
+    times = np.linspace(0, duration, steps +1).tolist()
+    quats = list(map(lambda x: quaternion_from_vectors(model_lookvec, x), vecs))
+
+    return PiecewiseQuaternionSlerp(times, quats)
+
+
+class FrustumMover(LeafSystem):
+    def __init__(self, plant, body):
+        LeafSystem.__init__(self)
+        self.plant = plant
+        self.plant_context = None
+        self.body = body
+
+        self.DeclareVectorInputPort('commanded_translation', 3)
+        self.DeclareVectorInputPort('commanded_orientation', 4)
+
+        self.DeclareContinuousState(1)
+
+    def Initialize(self, plant_context):
+        self.plant_context = plant_context
+
+    def DoCalcTimeDerivatives(self, context, derivatives):
+        if self.plant_context is None:
+            derivatives.get_mutable_vector().SetFromVector([0.0])
+            return
+
+        t = self.GetInputPort('commanded_translation').Eval(context)
+        q = Quaternion(*self.GetInputPort('commanded_orientation').Eval(context))
+        X_WO = RigidTransform(q, t)
+        self.plant.SetFreeBodyPose(self.plant_context, self.body, X_WO)
+        derivatives.get_mutable_vector().SetFromVector([1.0])
+
 
 def run_sim(args: SimArgs):
     np.random.seed(args.seed)
@@ -195,12 +269,13 @@ def run_sim(args: SimArgs):
     parser = Parser(plant, scene_graph)
 
     frustum_model = make_frustum(parser)
-    frustum_body = plant.GetBodyByName("base_link", frustum_model)
+    # plant.set_gravity_enabled(frustum_model, False)
+    frustum_body = plant.GetBodyByName('base_link', frustum_model)
 
 
     for id_ in range(args.spheres_count):
         sphere_model = make_sphere(parser, f'sphr_{id_:04d}')
-        sphere_body = plant.GetBodyByName("sphere_base", sphere_model)
+        sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
         position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
         plant.WeldFrames(
             plant.world_frame(),
@@ -208,22 +283,30 @@ def run_sim(args: SimArgs):
             RigidTransform(position)
         )
 
-    R_WL = RotationMatrix.MakeYRotation(np.radians(20.))
-    t_L_W = (args.volume[0, :] - args.volume[1, :]) * 0.1
+    R_WL = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+    vol = args.volume[1, :] - args.volume[0, :]
+    span = vol * 1.5
+    t_L_W = vol / 2
     X_WL = RigidTransform(R_WL, t_L_W)
 
-    plant.WeldFrames(
-        plant.world_frame(),
-        frustum_body.body_frame(),
-        RigidTransform(t_L_W)
-    )
-    print(t_L_W)
+    t = make_figure8_translational_trajectory(args.experiment_duration, X_WL, span)
+    r = make_circular_roto_trajectory(args.experiment_duration)
+    tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
+    ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
-    t = make_figure8_translational_trajectory(args.experiment_duration, RigidTransform(),
-                                              t_L_W)
-    trajectory_source = builder.AddSystem(TrajectorySource(t))
+    frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
 
     plant.Finalize()
+
+    builder.Connect(
+        tr_trajectory_source.get_output_port(0),
+        frustum_mover.GetInputPort('commanded_translation')
+    )
+
+    builder.Connect(
+        ro_trajectory_source.get_output_port(0),
+        frustum_mover.GetInputPort('commanded_orientation')
+    )
 
     meshcat = StartMeshcat()
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
@@ -232,7 +315,14 @@ def run_sim(args: SimArgs):
 
     context = diagram.CreateDefaultContext()
     simulator = Simulator(diagram, context)
+    simulator.Initialize()
+    meshcat.StartRecording(set_visualizations_while_recording=False)
+
+    plant_context = diagram.GetMutableSubsystemContext(plant, simulator.get_mutable_context())
+    frustum_mover.Initialize(plant_context)
+
     simulator.AdvanceTo(args.experiment_duration)
+    meshcat.PublishRecording()
     open_browser_link(args.replay_browser, meshcat.web_url())
 
 
