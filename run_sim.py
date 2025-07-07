@@ -30,6 +30,14 @@ from pydrake.all import (
     PiecewiseQuaternionSlerp,
     TrajectorySource,
     Quaternion,
+    CameraInfo,
+    RgbdSensor,
+    RenderCameraCore,
+    ColorRenderCamera,
+    DepthRenderCamera,
+    DepthRange,
+    ClippingRange,
+    FrameId
 )
 
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
@@ -135,11 +143,10 @@ def calculate_rect_frustum_inertia(mass, bottom_width, top_width, aspect_ratio, 
            c * (bw**2 + bw*tw + tw**2 + bh**2 + bh*th + th**2)
 
 
-def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0]):
+def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ratio = 1.777):
     mass = 1.
     bottom_width = .2
     top_width = .02
-    aspect_ratio = 1.777
     height = .3
 
     #obj_filename = create_rectangular_frustum_mesh_file('rect_frustum.obj', bottom_width, top_width, aspect_ratio, height)
@@ -162,6 +169,37 @@ def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0]):
         raise Exception('unreachable')
 
     return parser.AddModelsFromString(frustum_str, 'sdf')[0]
+
+
+def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float) -> RgbdSensor:
+    width = 640
+    height = int(width // aspect_ratio)
+
+    focal_x, focal_y = 500.0, 500.0  # focal length in pixels
+    center_x, center_y = width/2, height/2  # principal point
+    
+    camera_info = CameraInfo(
+        width=width,
+        height=height,
+        focal_x=focal_x,
+        focal_y=focal_y,
+        center_x=center_x,
+        center_y=center_y
+    )
+    render_camera_core = RenderCameraCore(
+        camera_name,
+        camera_info,
+        clipping=ClippingRange(0.1, 10.0),
+        X_BS=RigidTransform(),
+    )
+    color_camera = ColorRenderCamera(render_camera_core)
+    depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(.15, 10.))
+    return RgbdSensor(
+        parent_id=frame_id,
+        X_PB=RigidTransform(),
+        color_camera=color_camera,
+        depth_camera=depth_camera,
+    )
 
 
 def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform, scale: np.array):
@@ -261,6 +299,10 @@ class FrustumMover(LeafSystem):
         derivatives.get_mutable_vector().SetFromVector([1.0])
 
 
+def SphereRecolorer(LeafSystem):
+    pass
+
+
 def run_sim(args: SimArgs):
     np.random.seed(args.seed)
 
@@ -268,10 +310,20 @@ def run_sim(args: SimArgs):
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
     parser = Parser(plant, scene_graph)
 
-    frustum_model = make_frustum(parser)
-    # plant.set_gravity_enabled(frustum_model, False)
+    camera_name = 'agents_cam'
+    aspect_ratio = 1.777
+    frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio)
     frustum_body = plant.GetBodyByName('base_link', frustum_model)
+    body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
+    camera = make_camera(camera_name, body_frame_id, aspect_ratio)
 
+    builder.AddSystem(camera)
+    builder.Connect(
+        scene_graph.get_query_output_port(),
+        camera.query_object_input_port()
+    )
+
+    # plant.set_gravity_enabled(frustum_model, False)
 
     for id_ in range(args.spheres_count):
         sphere_model = make_sphere(parser, f'sphr_{id_:04d}')
