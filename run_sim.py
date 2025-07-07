@@ -37,12 +37,13 @@ from pydrake.all import (
     DepthRenderCamera,
     DepthRange,
     ClippingRange,
-    FrameId
+    FrameId,
+    AbstractValue
 )
 
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
 
-SIM_DELTA_T = 1.e-3
+SIM_DELTA_T = 3.e-2
 
 def raise_browser_for_meshcat(browser, target_url, comm_filename):
     print(f'Meshcat is now available at {target_url}')
@@ -299,8 +300,28 @@ class FrustumMover(LeafSystem):
         derivatives.get_mutable_vector().SetFromVector([1.0])
 
 
-def SphereRecolorer(LeafSystem):
+def check_visibility() -> bool:
     pass
+
+
+class SphereRecolorer(LeafSystem):
+
+    def __init__(self, plant, sphere_names, camera):
+        LeafSystem.__init__(self)
+        self.plant = plant
+        self.sphere_names = sphere_names
+        self.agents_camera = camera
+
+        self.DeclareAbstractInputPort(
+            "body_poses",
+            model_value=AbstractValue.Make([RigidTransform()])
+        )
+        self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
+
+
+    def calc_recoloring(self, context, state):
+        pass
+        # print('recoloring',  context.get_time())
 
 
 def run_sim(args: SimArgs):
@@ -325,8 +346,10 @@ def run_sim(args: SimArgs):
 
     # plant.set_gravity_enabled(frustum_model, False)
 
+    sphere_names = []
     for id_ in range(args.spheres_count):
-        sphere_model = make_sphere(parser, f'sphr_{id_:04d}')
+        sphere_names.append(f'sphr_{id_:04d}')
+        sphere_model = make_sphere(parser, sphere_names[-1])
         sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
         position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
         plant.WeldFrames(
@@ -347,6 +370,7 @@ def run_sim(args: SimArgs):
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
     frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
+    recolorer = builder.AddSystem(SphereRecolorer(plant, sphere_names, camera))
 
     plant.Finalize()
 
@@ -358,6 +382,11 @@ def run_sim(args: SimArgs):
     builder.Connect(
         ro_trajectory_source.get_output_port(0),
         frustum_mover.GetInputPort('commanded_orientation')
+    )
+
+    builder.Connect(
+        plant.get_body_poses_output_port(),
+        recolorer.GetInputPort('body_poses')
     )
 
     meshcat = StartMeshcat()
