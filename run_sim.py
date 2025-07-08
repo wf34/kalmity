@@ -3,6 +3,7 @@
 from multiprocessing import Process
 import sys
 import typing
+import math
 import time
 import os
 import string
@@ -22,6 +23,7 @@ from pydrake.all import (
     DiagramBuilder,
     AddMultibodyPlantSceneGraph,
     Parser,
+    Sphere,
     RotationMatrix,
     RigidTransform,
     MeshcatVisualizer,
@@ -38,7 +40,8 @@ from pydrake.all import (
     DepthRange,
     ClippingRange,
     FrameId,
-    AbstractValue
+    AbstractValue,
+    Rgba,
 )
 
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
@@ -144,11 +147,13 @@ def calculate_rect_frustum_inertia(mass, bottom_width, top_width, aspect_ratio, 
            c * (bw**2 + bw*tw + tw**2 + bh**2 + bh*th + th**2)
 
 
-def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ratio = 1.777):
+def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ratio = 1.777, hfov=None):
+    if hfov is None:
+        raise Exception('unreachable')
     mass = 1.
     bottom_width = .2
     top_width = .02
-    height = .3
+    height = bottom_width / (2 * math.tan(hfov / 2.))
 
     #obj_filename = create_rectangular_frustum_mesh_file('rect_frustum.obj', bottom_width, top_width, aspect_ratio, height)
     obj_filename = 'rect_frustum.obj'
@@ -172,11 +177,12 @@ def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ra
     return parser.AddModelsFromString(frustum_str, 'sdf')[0]
 
 
-def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float) -> RgbdSensor:
+def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float, hfov: float) -> RgbdSensor:
     width = 640
     height = int(width // aspect_ratio)
 
-    focal_x, focal_y = 500.0, 500.0  # focal length in pixels
+    focal_x = width / (2 * math.tan(hfov / 2.))
+    focal_y = focal_x
     center_x, center_y = width/2, height/2  # principal point
     
     camera_info = CameraInfo(
@@ -195,9 +201,11 @@ def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float) -> Rgb
     )
     color_camera = ColorRenderCamera(render_camera_core)
     depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(.15, 10.))
+    R_PB = quaternion_from_vectors([0, 0, -1], [0, 0, 1])
+    tB_P = [0, 0, 0.119175]  # this needs to be regenerated when frustum is redone
     return RgbdSensor(
         parent_id=frame_id,
-        X_PB=RigidTransform(),
+        X_PB=RigidTransform(R_PB, tB_P),
         color_camera=color_camera,
         depth_camera=depth_camera,
     )
@@ -214,6 +222,7 @@ def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform,
         # Lemniscate of Bernoulli
         x = scale[0] * np.sin(theta) / 2
         y = scale[1] * np.sin(theta) * np.cos(theta) / 2
+
         z = 0.
 
         positions.append([x, y, z, 1])
@@ -229,7 +238,7 @@ def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform,
 
     return trajectory
 
-def quaternion_from_vectors(source, target):
+def quaternion_from_vectors(target, source):
 
     a = source / np.linalg.norm(source)
     b = target / np.linalg.norm(target)
@@ -259,16 +268,16 @@ def quaternion_from_vectors(source, target):
 
 
 def make_circular_roto_trajectory(duration: float):
-    model_lookvec = np.array([0, 0, -1])
+    model_lookvec = np.array([0, 0, -1]) * -1 # negation cause we look "in"
 
-    origin_lookvec = np.array([0, 1, 0])
-    half_motion_lookvec = origin_lookvec * -1
+    origin_lookvec = [0, 1, 0]
     quat_lookvec = [-1, 0, 0]
+    half_motion_lookvec = [0, -1, 0]
     three_quat_lookvec = [1, 0, 0]
     steps = 4
     vecs = [origin_lookvec, quat_lookvec, half_motion_lookvec, three_quat_lookvec, origin_lookvec]
     times = np.linspace(0, duration, steps +1).tolist()
-    quats = list(map(lambda x: quaternion_from_vectors(model_lookvec, x), vecs))
+    quats = list(map(lambda x: quaternion_from_vectors(x, model_lookvec), vecs))
 
     return PiecewiseQuaternionSlerp(times, quats)
 
@@ -300,45 +309,95 @@ class FrustumMover(LeafSystem):
         derivatives.get_mutable_vector().SetFromVector([1.0])
 
 
-def check_visibility() -> bool:
-    pass
+def check_visibility(X_WS: RigidTransform, intrinsics: CameraInfo, p_W: np.array) -> bool:
+    width, height = intrinsics.width(), intrinsics.height()
+    fx, fy = intrinsics.focal_x(), intrinsics.focal_y()
+    cx, cy = intrinsics.center_x(), intrinsics.center_y()
+    p_S = X_WS.inverse() @ p_W
+    K = intrinsics.intrinsic_matrix()
+    if p_S[2] <= 0.:
+        return False  # is behind
+    p_px = K @ p_S
+    u, v = p_px[:2]
+
+    return 0. <= u and u <= width and \
+           0. <= v and v <= height
 
 
 class SphereRecolorer(LeafSystem):
 
-    def __init__(self, plant, sphere_names, camera):
+    def __init__(self, meshcat, plant, sphere_models, frustum_model, camera,
+                 basic_color=[0.8, 0.2, 0.2, 1.0],
+                 seen_color=[0.2, 0.8, 0.2, 1.]):
         LeafSystem.__init__(self)
+        self.meshcat = meshcat
         self.plant = plant
-        self.sphere_names = sphere_names
+        self.sphere_models = sphere_models
+        self.frustum_model = frustum_model
         self.agents_camera = camera
+        self.basic_color = basic_color
+        self.seen_color = seen_color
 
         self.DeclareAbstractInputPort(
             "body_poses",
             model_value=AbstractValue.Make([RigidTransform()])
         )
+
         self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
 
 
+    def get_color(self, vis_status):
+        return self.seen_color if vis_status else self.basic_color
+
+
+    def initialize(self, camera_context):
+        self.camera_context = camera_context
+        core_camera = self.agents_camera.GetColorRenderCamera(self.camera_context).core()
+        self.camera_info = core_camera.intrinsics()
+        self.X_PB = self.agents_camera.GetX_PB(self.camera_context)
+        self.X_BS = core_camera.sensor_pose_in_camera_body()
+
+
     def calc_recoloring(self, context, state):
-        pass
-        # print('recoloring',  context.get_time())
+        poses = self.GetInputPort('body_poses').Eval(context)
+        agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
+        X_WA = poses[agents_ind]
+        X_WS = X_WA @ self.X_PB @ self.X_BS
+        vis_cnt = 0
+        for model in self.sphere_models:
+            ind = self.plant.GetBodyByName('sphere_base', model).index()
+            p_WSphere = poses[ind].translation()
+            vis_status = check_visibility(X_WS, self.camera_info, p_WSphere)
+            model_name = self.plant.GetModelInstanceName(model)
+            path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
+            #self.meshcat.SetProperty(path, 'color', self.get_color(vis_status), time_in_recording=context.get_time())
+            self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
+            vis_cnt += int(vis_status)
+
+        print(f'{context.get_time():.4f}, visible: {vis_cnt}')
+
+        #self.meshcat.SetObject('indicator_sphere', Sphere(0.1), rgba=Rgba(*self.get_color(vis_cnt > 0)), time=context.get_time())
+        #self.meshcat.SetTransform('indicator_sphere', RigidTransform())
 
 
 def run_sim(args: SimArgs):
     np.random.seed(args.seed)
 
+    meshcat = StartMeshcat()
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
     parser = Parser(plant, scene_graph)
 
     camera_name = 'agents_cam'
     aspect_ratio = 1.777
-    frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio)
+    hfov = np.radians(80.)
+
+    frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio, hfov=hfov)
     frustum_body = plant.GetBodyByName('base_link', frustum_model)
     body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
-    camera = make_camera(camera_name, body_frame_id, aspect_ratio)
+    camera = make_camera(camera_name, body_frame_id, aspect_ratio, hfov)
 
-    builder.AddSystem(camera)
+    camera_system = builder.AddSystem(camera)
     builder.Connect(
         scene_graph.get_query_output_port(),
         camera.query_object_input_port()
@@ -346,11 +405,11 @@ def run_sim(args: SimArgs):
 
     # plant.set_gravity_enabled(frustum_model, False)
 
-    sphere_names = []
+    sphere_models = []
     for id_ in range(args.spheres_count):
-        sphere_names.append(f'sphr_{id_:04d}')
-        sphere_model = make_sphere(parser, sphere_names[-1])
-        sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
+        sphere_name = f'sphr_{id_:04d}'
+        sphere_models.append(make_sphere(parser, sphere_name))
+        sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
         position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
         plant.WeldFrames(
             plant.world_frame(),
@@ -358,7 +417,8 @@ def run_sim(args: SimArgs):
             RigidTransform(position)
         )
 
-    R_WL = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+    #R_WL = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+    R_WL = RotationMatrix.Identity()
     vol = args.volume[1, :] - args.volume[0, :]
     span = vol * 1.5
     t_L_W = vol / 2
@@ -370,7 +430,8 @@ def run_sim(args: SimArgs):
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
     frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
-    recolorer = builder.AddSystem(SphereRecolorer(plant, sphere_names, camera))
+    recolorer = builder.AddSystem(SphereRecolorer(
+        meshcat, plant, sphere_models, frustum_model, camera))
 
     plant.Finalize()
 
@@ -389,7 +450,6 @@ def run_sim(args: SimArgs):
         recolorer.GetInputPort('body_poses')
     )
 
-    meshcat = StartMeshcat()
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
     graph_from_dot_data(diagram.GetGraphvizString(max_depth=4))[0].write_png(args.diagram_destination)
@@ -397,10 +457,12 @@ def run_sim(args: SimArgs):
     context = diagram.CreateDefaultContext()
     simulator = Simulator(diagram, context)
     simulator.Initialize()
-    meshcat.StartRecording(set_visualizations_while_recording=False)
+    meshcat.StartRecording(set_visualizations_while_recording=True)
 
     plant_context = diagram.GetMutableSubsystemContext(plant, simulator.get_mutable_context())
     frustum_mover.Initialize(plant_context)
+    camera_context = diagram.GetMutableSubsystemContext(camera_system, simulator.get_mutable_context())
+    recolorer.initialize(camera_context)
 
     simulator.AdvanceTo(args.experiment_duration)
     meshcat.PublishRecording()
