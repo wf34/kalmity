@@ -3,3 +3,4 @@ drake
 numpy
 matplotlib
 pydot
+pyquaternion  # optional
