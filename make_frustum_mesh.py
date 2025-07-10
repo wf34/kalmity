@@ -41,27 +41,36 @@ def create_rectangular_frustum_mesh_file(filename="rect_frustum.obj",
         [ tw,  tl, height],  # 6: top front-right  
         [-tw,  tl, height]   # 7: top front-left
     ])
+
+    normals = [
+        [0, 0, -1],  # Bottom face normal (pointing down)
+        [0, 0, 1],   # Top face normal (pointing up)
+        [0, -1, 0],  # Back face normal
+        [1, 0, 0],   # Right face normal
+        [0, 1, 0],   # Front face normal
+        [-1, 0, 0]   # Left face normal
+    ]
     
     # Define faces (using 0-based indexing, will convert to 1-based for OBJ)
     faces = [
         # Bottom face (looking up from below, clockwise)
-        [0, 3, 2], [0, 2, 1],
+        ([0, 3, 2], 0), ([0, 2, 1], 0),
         
         # Top face (looking down from above, counter-clockwise)
-        [4, 5, 6], [4, 6, 7],
+        ([4, 5, 6], 1), ([4, 6, 7], 1),
         
         # Side faces (each side has 2 triangles)
         # Back face (Y = -length/2)
-        [0, 1, 5], [0, 5, 4],
+        ([0, 1, 5], 2), ([0, 5, 4], 2),
         
         # Right face (X = +width/2)  
-        [1, 2, 6], [1, 6, 5],
+        ([1, 2, 6], 3), ([1, 6, 5], 3),
         
         # Front face (Y = +length/2)
-        [2, 3, 7], [2, 7, 6],
+        ([2, 3, 7], 4), ([2, 7, 6], 4),
         
         # Left face (X = -width/2)
-        [3, 0, 4], [3, 4, 7]
+        ([3, 0, 4], 5), ([3, 4, 7], 5)
     ]
     
     # Write OBJ file
@@ -71,10 +80,15 @@ def create_rectangular_frustum_mesh_file(filename="rect_frustum.obj",
         # Write vertices
         for v in vertices:
             f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+
+        for n in normals:
+            f.write(f"vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n")
         
         # Write faces (convert to 1-based indexing for OBJ format)
-        for face in faces:
-            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+        for face_data in faces:
+            face_verts, normal_idx = face_data
+            f.write(f"f {face_verts[0]+1}//{normal_idx+1} {face_verts[1]+1}//{normal_idx+1} {face_verts[2]+1}//{normal_idx+1}\n")
+
     
     print(f"Created rectangular frustum mesh: {filename}")
     return filename
