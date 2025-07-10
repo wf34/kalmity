@@ -16,7 +16,11 @@ import numpy as np
 from pydot import graph_from_dot_data
 from tap import Tap
 
+import matplotlib.pyplot as plt
+
 from pydrake.all import (
+    MakeRenderEngineVtk,
+    RenderEngineVtkParams,
     AbstractValue,
     LeafSystem,
     StartMeshcat,
@@ -30,18 +34,21 @@ from pydrake.all import (
     Simulator,
     PiecewisePolynomial,
     PiecewiseQuaternionSlerp,
+    Trajectory,
     TrajectorySource,
-    Quaternion,
     CameraInfo,
     RgbdSensor,
     RenderCameraCore,
     ColorRenderCamera,
+    Cylinder,
     DepthRenderCamera,
     DepthRange,
     ClippingRange,
     FrameId,
     AbstractValue,
     Rgba,
+    RollPitchYaw,
+    Quaternion,
 )
 
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
@@ -196,11 +203,11 @@ def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float, hfov: 
     render_camera_core = RenderCameraCore(
         camera_name,
         camera_info,
-        clipping=ClippingRange(0.1, 10.0),
+        clipping=ClippingRange(5e-3, 100.0),
         X_BS=RigidTransform(),
     )
     color_camera = ColorRenderCamera(render_camera_core)
-    depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(.15, 10.))
+    depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(6e-3, 100.))
     R_PB = quaternion_from_vectors([0, 0, -1], [0, 0, 1])
     tB_P = [0, 0, 0.119175]  # this needs to be regenerated when frustum is redone
     return RgbdSensor(
@@ -359,6 +366,7 @@ class SphereRecolorer(LeafSystem):
 
 
     def calc_recoloring(self, context, state):
+        now = context.get_time()
         poses = self.GetInputPort('body_poses').Eval(context)
         agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
         X_WA = poses[agents_ind]
@@ -370,11 +378,19 @@ class SphereRecolorer(LeafSystem):
             vis_status = check_visibility(X_WS, self.camera_info, p_WSphere)
             model_name = self.plant.GetModelInstanceName(model)
             path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
-            #self.meshcat.SetProperty(path, 'color', self.get_color(vis_status), time_in_recording=context.get_time())
             self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
             vis_cnt += int(vis_status)
 
-        print(f'{context.get_time():.4f}, visible: {vis_cnt}')
+        print(f'{now:.4f}, visible: {vis_cnt}')
+
+        #color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
+        #color_array = np.array(color_image.data).reshape(
+        #      480  , color_image.width(), 3
+        #) #color_image.height()
+        #fig = plt.figure(figsize=(10, 7.5))#5.6274))
+        #ax = fig.subplots(nrows=1, ncols=1)
+        #ax.imshow(color_array)
+        #fig.savefig(f'frames/{now:.4f}.png')
 
         #self.meshcat.SetObject('indicator_sphere', Sphere(0.1), rgba=Rgba(*self.get_color(vis_cnt > 0)), time=context.get_time())
         #self.meshcat.SetTransform('indicator_sphere', RigidTransform())
@@ -385,7 +401,10 @@ def run_sim(args: SimArgs):
 
     meshcat = StartMeshcat()
     builder = DiagramBuilder()
+    render_params = RenderEngineVtkParams()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
+    render_engine = MakeRenderEngineVtk(render_params)
+    scene_graph.AddRenderer("agents_cam", render_engine)
     parser = Parser(plant, scene_graph)
 
     camera_name = 'agents_cam'
