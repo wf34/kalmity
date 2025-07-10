@@ -19,7 +19,7 @@ from tap import Tap
 import matplotlib.pyplot as plt
 
 from pydrake.all import (
-    MakeRenderEngineVtk,
+    MakeRenderEngineGl,
     RenderEngineVtkParams,
     AbstractValue,
     LeafSystem,
@@ -242,7 +242,10 @@ def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ra
     return parser.AddModelsFromString(frustum_str, 'sdf')[0]
 
 
-def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float, hfov: float) -> RgbdSensor:
+def make_camera(scene_graph, camera_name: str, frame_id: FrameId, aspect_ratio: float, hfov: float) -> RgbdSensor:
+    if not scene_graph.HasRenderer(camera_name):
+        raise Exception('unreachable')
+
     width = 640
     height = int(width // aspect_ratio)
 
@@ -264,7 +267,7 @@ def make_camera(camera_name: str, frame_id: FrameId, aspect_ratio: float, hfov: 
         clipping=ClippingRange(5e-3, 100.0),
         X_BS=RigidTransform(),
     )
-    color_camera = ColorRenderCamera(render_camera_core)
+    color_camera = ColorRenderCamera(render_camera_core, show_window=False)  # works only with Vtk, backed=GLX
     depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(6e-3, 100.))
     R_PB = quaternion_from_vectors([0, 0, -1], [0, 0, 1])
     tB_P = [0, 0, 0.119175]  # this needs to be regenerated when frustum is redone
@@ -417,6 +420,7 @@ class SphereRecolorer(LeafSystem):
         )
 
         self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
+        self.tick_counter = 0
 
 
     def initialize(self, camera_context):
@@ -446,17 +450,14 @@ class SphereRecolorer(LeafSystem):
 
         print(f'{now:.4f}, visible: {vis_cnt}')
 
-        #color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
-        #color_array = np.array(color_image.data).reshape(
-        #      480  , color_image.width(), 3
-        #) #color_image.height()
-        #fig = plt.figure(figsize=(10, 7.5))#5.6274))
-        #ax = fig.subplots(nrows=1, ncols=1)
-        #ax.imshow(color_array)
-        #fig.savefig(f'frames/{now:.4f}.png')
+        color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
+        color_array = color_image.data[:, :, :3]
+        fig = plt.figure(figsize=(10, 5.6274))
+        ax = fig.subplots(nrows=1, ncols=1)
+        ax.imshow(color_array)
+        fig.savefig(f'frames/{self.tick_counter:07d}.png')
+        self.tick_counter += 1
 
-        #self.meshcat.SetObject('indicator_sphere', Sphere(0.1), rgba=Rgba(*self.get_color(vis_cnt > 0)), time=context.get_time())
-        #self.meshcat.SetTransform('indicator_sphere', RigidTransform())
 
 
 def run_sim(args: SimArgs):
@@ -464,20 +465,20 @@ def run_sim(args: SimArgs):
 
     meshcat = StartMeshcat()
     builder = DiagramBuilder()
-    render_params = RenderEngineVtkParams()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
-    render_engine = MakeRenderEngineVtk(render_params)
-    scene_graph.AddRenderer("agents_cam", render_engine)
-    parser = Parser(plant, scene_graph)
+    render_engine = MakeRenderEngineGl()
 
     camera_name = 'agents_cam'
+    scene_graph.AddRenderer(camera_name, render_engine)
+    parser = Parser(plant, scene_graph)
+
     aspect_ratio = 1.777
     hfov = np.radians(80.)
 
     frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio, hfov=hfov)
     frustum_body = plant.GetBodyByName('base_link', frustum_model)
     body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
-    camera = make_camera(camera_name, body_frame_id, aspect_ratio, hfov)
+    camera = make_camera(scene_graph, camera_name, body_frame_id, aspect_ratio, hfov)
 
     camera_system = builder.AddSystem(camera)
     builder.Connect(
