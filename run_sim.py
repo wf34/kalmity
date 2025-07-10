@@ -125,7 +125,64 @@ class SimArgs(Tap):
         self.volume = np.array(self.volume)
 
 
-def make_sphere(parser, id_, R=0.03, mass=0.1, color=[0.8, 0.2, 0.2, 1.0]):
+def visualize_trajectory_with_cylinders(meshcat_vis, trajectory_points, line_name="trajectory"):
+    """
+    Visualize trajectory using thin cylinders as line segments
+    """
+    for i in range(len(trajectory_points) - 1):
+        start_point = trajectory_points[i]
+        end_point = trajectory_points[i + 1]
+
+        # Calculate line properties
+        direction = end_point - start_point
+        length = np.linalg.norm(direction)
+
+        if length < 1e-6:  # Skip very short segments
+            continue
+
+        # Calculate midpoint
+        midpoint = (start_point + end_point) / 2
+
+        # Calculate rotation to align cylinder with line direction
+        z_axis = direction / length
+        # Create orthogonal vectors
+        if abs(z_axis[2]) < 0.9:
+            x_axis = np.cross([0, 0, 1], z_axis)
+        else:
+            x_axis = np.cross([1, 0, 0], z_axis)
+        x_axis = x_axis / np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+
+        # Create rotation matrix
+        rotation = RotationMatrix(np.column_stack([x_axis, y_axis, z_axis]))
+
+        # Create transform
+        transform = RigidTransform(rotation, midpoint)
+
+        # Create cylinder geometry (thin radius for line appearance)
+        cylinder = Cylinder(radius=0.01, length=length)
+
+        # Add to meshcat
+        segment_name = f"{line_name}_segment_{i}"
+        meshcat_vis.SetObject(
+            segment_name,
+            cylinder,
+            Rgba(0.0, 0.0, 0.0, 1.0)
+        )
+        meshcat_vis.SetTransform(segment_name, transform)
+
+
+def make_sphere_passive_vis(meshcat_vis, sphere_name, meshcat, X_WB, color=[0.8, 0.2, 0.2, 0.5], R=0.05):
+    passive_sphere_name = f'passive_{sphere_name}'
+    meshcat_vis.SetObject(
+        passive_sphere_name,
+        Sphere(R),
+        Rgba(*color),
+    )
+    meshcat_vis.SetTransform(passive_sphere_name, X_WB)
+
+
+def make_sphere(parser, id_, R=0.1, mass=0.1, color=[0.2, 0.8, 0.2, 1.0]):
     inertia = .4 * mass * R ** 2
     sphere_str = None
     with open(os.path.join(os.path.dirname(sys.argv[0]), 'sphere_sdf.template'), 'r') as the_file:
@@ -243,7 +300,7 @@ def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform,
         times, positions_world, zero_end_point_derivatives=True
     )
 
-    return trajectory
+    return trajectory, positions_world.T
 
 def quaternion_from_vectors(target, source):
 
@@ -274,17 +331,29 @@ def quaternion_from_vectors(target, source):
     return Quaternion(w=w, x=x, y=y, z=z)
 
 
-def make_circular_roto_trajectory(duration: float):
-    model_lookvec = np.array([0, 0, -1]) * -1 # negation cause we look "in"
+def make_circular_roto_trajectory(duration: float, translational_t: Trajectory):
+    timespan = translational_t.end_time() - translational_t.start_time()
+    t_origin = translational_t.value(0)
+    model_lookvec = np.array([0, 0, -1])
 
     origin_lookvec = [0, 1, 0]
-    quat_lookvec = [-1, 0, 0]
-    half_motion_lookvec = [0, -1, 0]
-    three_quat_lookvec = [1, 0, 0]
-    steps = 4
-    vecs = [origin_lookvec, quat_lookvec, half_motion_lookvec, three_quat_lookvec, origin_lookvec]
+    r_LB = quaternion_from_vectors(origin_lookvec, model_lookvec) # To local attitude from Obj-file attitude
+
+    yaws = [0]
+    steps = 8
+    for resp_time in map(lambda x: timespan * x / steps, range(1, steps)):
+        look_at = translational_t.value(resp_time) - t_origin
+        look_at /= np.linalg.norm(look_at)
+        yaws.append(np.arctan2(look_at[1], look_at[0]) + np.pi/2)
+        assert look_at[2] == 0
+    yaws.append(0)
+
+    for step, v in enumerate(yaws):
+        rel_time = step / steps
+        print(step, rel_time, np.degrees(v))
+
     times = np.linspace(0, duration, steps +1).tolist()
-    quats = list(map(lambda x: quaternion_from_vectors(x, model_lookvec), vecs))
+    quats = list(map(lambda yaw: RotationMatrix(RollPitchYaw(0, 0, yaw)).ToQuaternion().multiply(r_LB), yaws))
 
     return PiecewiseQuaternionSlerp(times, quats)
 
@@ -333,17 +402,13 @@ def check_visibility(X_WS: RigidTransform, intrinsics: CameraInfo, p_W: np.array
 
 class SphereRecolorer(LeafSystem):
 
-    def __init__(self, meshcat, plant, sphere_models, frustum_model, camera,
-                 basic_color=[0.8, 0.2, 0.2, 1.0],
-                 seen_color=[0.2, 0.8, 0.2, 1.]):
+    def __init__(self, meshcat, plant, sphere_models, frustum_model, camera):
         LeafSystem.__init__(self)
         self.meshcat = meshcat
         self.plant = plant
         self.sphere_models = sphere_models
         self.frustum_model = frustum_model
         self.agents_camera = camera
-        self.basic_color = basic_color
-        self.seen_color = seen_color
 
         self.DeclareAbstractInputPort(
             "body_poses",
@@ -353,13 +418,10 @@ class SphereRecolorer(LeafSystem):
         self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
 
 
-    def get_color(self, vis_status):
-        return self.seen_color if vis_status else self.basic_color
-
-
     def initialize(self, camera_context):
         self.camera_context = camera_context
-        core_camera = self.agents_camera.GetColorRenderCamera(self.camera_context).core()
+        self.color_camera = self.agents_camera.GetColorRenderCamera(self.camera_context)
+        core_camera = self.color_camera.core()
         self.camera_info = core_camera.intrinsics()
         self.X_PB = self.agents_camera.GetX_PB(self.camera_context)
         self.X_BS = core_camera.sensor_pose_in_camera_body()
@@ -430,21 +492,27 @@ def run_sim(args: SimArgs):
         sphere_models.append(make_sphere(parser, sphere_name))
         sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
         position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
+        X_WB = RigidTransform(position)
         plant.WeldFrames(
             plant.world_frame(),
             sphere_body.body_frame(),
-            RigidTransform(position)
+            X_WB,
         )
+        make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
 
-    #R_WL = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
-    R_WL = RotationMatrix.Identity()
+    R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+    R_WL1 = RotationMatrix.Identity()
     vol = args.volume[1, :] - args.volume[0, :]
     span = vol * 1.5
-    t_L_W = vol / 2
-    X_WL = RigidTransform(R_WL, t_L_W)
+    t_L_W = args.agent_origin
+    X_WL1 = RigidTransform(R_WL1, t_L_W)
+    X_WL2 = RigidTransform(R_WL2, t_L_W)
 
-    t = make_figure8_translational_trajectory(args.experiment_duration, X_WL, span)
-    r = make_circular_roto_trajectory(args.experiment_duration)
+    t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, span)
+    r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
+    t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, span)
+    visualize_trajectory_with_cylinders(meshcat, positions)
+
     tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
