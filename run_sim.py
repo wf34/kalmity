@@ -116,8 +116,9 @@ def open_browser_link(replay_browser, meshcat_web_url):
 class SimArgs(Tap):
     seed: int = 34
     experiment_duration: float = 5.  # in seconds
-    spheres_count: int = 50
-    volume: typing.List[typing.List[float]] = [[0, 0, 0], [10, 5, 5]]
+    spheres_count: int = 150
+    volume: typing.List[typing.List[float]] = [[0, 0, 1], [10, 5, 4]]
+    agent_origin: typing.List[float] = [5, 2.5, 2.5]
     replay_browser: str = 'chromium'
     diagram_destination: str = 'sim_diagram.png'
 
