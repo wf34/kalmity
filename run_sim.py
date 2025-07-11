@@ -19,7 +19,8 @@ from tap import Tap
 import matplotlib.pyplot as plt
 
 from pydrake.all import (
-    MakeRenderEngineGl,
+    RenderEngineVtkParams,
+    MakeRenderEngineVtk,
     RenderEngineVtkParams,
     AbstractValue,
     LeafSystem,
@@ -35,6 +36,7 @@ from pydrake.all import (
     PiecewisePolynomial,
     PiecewiseQuaternionSlerp,
     Trajectory,
+    TriggerType,
     TrajectorySource,
     CameraInfo,
     RgbdSensor,
@@ -116,14 +118,19 @@ def open_browser_link(replay_browser, meshcat_web_url):
 class SimArgs(Tap):
     seed: int = 34
     experiment_duration: float = 5.  # in seconds
-    spheres_count: int = 150
+    spheres_count: int = 50
+    outer_spheres_count: int = 30
     volume: typing.List[typing.List[float]] = [[0, 0, 1], [10, 5, 4]]
+    volume_outer: typing.List[typing.List[float]] = [[-10, -5, -1], [20, 10, 6]]
+    agent_span: typing.List[typing.List[float]] = [[0, 0, 1.5], [15, 7.5, 8]]
     agent_origin: typing.List[float] = [5, 2.5, 2.5]
     replay_browser: str = 'chromium'
     diagram_destination: str = 'sim_diagram.png'
 
     def process_args(self):
         self.volume = np.array(self.volume)
+        self.volume_outer = np.array(self.volume_outer)
+        self.agent_span = np.array(self.agent_span)
 
 
 def visualize_trajectory_with_cylinders(meshcat_vis, trajectory_points, line_name="trajectory"):
@@ -268,7 +275,7 @@ def make_camera(scene_graph, camera_name: str, frame_id: FrameId, aspect_ratio: 
         X_BS=RigidTransform(),
     )
     color_camera = ColorRenderCamera(render_camera_core, show_window=False)  # works only with Vtk, backed=GLX
-    depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(6e-3, 100.))
+    depth_camera = DepthRenderCamera(render_camera_core, depth_range=DepthRange(6e-3, 65.))
     R_PB = quaternion_from_vectors([0, 0, -1], [0, 0, 1])
     tB_P = [0, 0, 0.119175]  # this needs to be regenerated when frustum is redone
     return RgbdSensor(
@@ -279,7 +286,8 @@ def make_camera(scene_graph, camera_name: str, frame_id: FrameId, aspect_ratio: 
     )
 
 
-def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform, scale: np.array):
+def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform, span: np.array):
+    scale = span[1, :] - span[0, :]
     num_samples = 100
     times = np.linspace(0, duration, num_samples)
 
@@ -348,7 +356,7 @@ def make_circular_roto_trajectory(duration: float, translational_t: Trajectory):
     for resp_time in map(lambda x: timespan * x / steps, range(1, steps)):
         look_at = translational_t.value(resp_time) - t_origin
         look_at /= np.linalg.norm(look_at)
-        yaws.append(np.arctan2(look_at[1], look_at[0]) + np.pi/2)
+        yaws.append(np.arctan2(look_at[1], look_at[0]).item() + np.pi/2)
         assert look_at[2] == 0
     yaws.append(0)
 
@@ -434,6 +442,7 @@ class SphereRecolorer(LeafSystem):
 
     def calc_recoloring(self, context, state):
         now = context.get_time()
+        delta = self.plant.time_step()
         poses = self.GetInputPort('body_poses').Eval(context)
         agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
         X_WA = poses[agents_ind]
@@ -448,16 +457,30 @@ class SphereRecolorer(LeafSystem):
             self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
             vis_cnt += int(vis_status)
 
-        print(f'{now:.4f}, visible: {vis_cnt}')
+        if now % delta < 1e-10:
+            # verbosity happens only during round increments of simulation steps
+            print(f'{now:.4f}, visible: {vis_cnt}')
 
-        color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
-        color_array = color_image.data[:, :, :3]
-        fig = plt.figure(figsize=(10, 5.6274))
-        ax = fig.subplots(nrows=1, ncols=1)
-        ax.imshow(color_array)
-        fig.savefig(f'frames/{self.tick_counter:07d}.png')
-        self.tick_counter += 1
+            color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
+            color_array = color_image.data[:, :, :3]
+            fig = plt.figure(figsize=(10, 5.6274))
+            ax = fig.subplots(nrows=1, ncols=1)
+            ax.imshow(color_array)
+            fig.savefig(f'frames/{self.tick_counter:07d}.png')
+            self.tick_counter += 1
+            plt.close(fig)
 
+
+def get_outer_position(args) -> np.array:
+    is_outer = False
+    while not is_outer:
+        tentative_pos = np.random.uniform(low=args.volume_outer[0, :], high=args.volume_outer[1, :])
+        if np.all(args.volume[0, :] <= tentative_pos) and \
+           np.all(tentative_pos <= args.volume[1, :]):
+            continue
+        else:
+           is_outer = True
+    return tentative_pos
 
 
 def run_sim(args: SimArgs):
@@ -466,7 +489,10 @@ def run_sim(args: SimArgs):
     meshcat = StartMeshcat()
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=SIM_DELTA_T)
-    render_engine = MakeRenderEngineGl()
+
+    render_params = RenderEngineVtkParams()
+    render_params.backend = 'GLX'
+    render_engine = MakeRenderEngineVtk(render_params)
 
     camera_name = 'agents_cam'
     scene_graph.AddRenderer(camera_name, render_engine)
@@ -489,11 +515,14 @@ def run_sim(args: SimArgs):
     # plant.set_gravity_enabled(frustum_model, False)
 
     sphere_models = []
-    for id_ in range(args.spheres_count):
+    for id_ in range(args.spheres_count + args.outer_spheres_count):
         sphere_name = f'sphr_{id_:04d}'
         sphere_models.append(make_sphere(parser, sphere_name))
         sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
-        position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
+        if id_ < args.spheres_count:
+            position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
+        else:
+            position = get_outer_position(args)
         X_WB = RigidTransform(position)
         plant.WeldFrames(
             plant.world_frame(),
@@ -504,15 +533,13 @@ def run_sim(args: SimArgs):
 
     R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
     R_WL1 = RotationMatrix.Identity()
-    vol = args.volume[1, :] - args.volume[0, :]
-    span = vol * 1.5
     t_L_W = args.agent_origin
     X_WL1 = RigidTransform(R_WL1, t_L_W)
     X_WL2 = RigidTransform(R_WL2, t_L_W)
 
-    t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, span)
+    t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, args.agent_span)
     r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
-    t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, span)
+    t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
     visualize_trajectory_with_cylinders(meshcat, positions)
 
     tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
