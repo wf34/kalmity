@@ -54,7 +54,7 @@ def create_rectangular_frustum_mesh_file(filename="rect_frustum.obj",
     # Define faces (using 0-based indexing, will convert to 1-based for OBJ)
     faces = [
         # Bottom face (looking up from below, clockwise)
-        ([0, 3, 2], 0), ([0, 2, 1], 0),
+        #([0, 3, 2], 0), ([0, 2, 1], 0),
         
         # Top face (looking down from above, counter-clockwise)
         ([4, 5, 6], 1), ([4, 6, 7], 1),
