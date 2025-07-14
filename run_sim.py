@@ -126,6 +126,7 @@ class SimArgs(Tap):
     agent_origin: typing.List[float] = [5, 2.5, 2.5]
     replay_browser: str = 'chromium'
     diagram_destination: str = 'sim_diagram.png'
+    is_normal: bool = True
 
     def process_args(self):
         self.volume = np.array(self.volume)
@@ -180,7 +181,7 @@ def visualize_trajectory_with_cylinders(meshcat_vis, trajectory_points, line_nam
         meshcat_vis.SetTransform(segment_name, transform)
 
 
-def make_sphere_passive_vis(meshcat_vis, sphere_name, meshcat, X_WB, color=[0.8, 0.2, 0.2, 0.5], R=0.05):
+def make_sphere_passive_vis(meshcat_vis, sphere_name, meshcat, X_WB, color=[0.0, 0.8, 0.2, 0.2], R=0.05):
     passive_sphere_name = f'passive_{sphere_name}'
     meshcat_vis.SetObject(
         passive_sphere_name,
@@ -190,7 +191,7 @@ def make_sphere_passive_vis(meshcat_vis, sphere_name, meshcat, X_WB, color=[0.8,
     meshcat_vis.SetTransform(passive_sphere_name, X_WB)
 
 
-def make_sphere(parser, id_, R=0.1, mass=0.1, color=[0.2, 0.8, 0.2, 1.0]):
+def make_sphere(parser, id_, R=0.1, mass=0.1, color=[0.8, 0.2, 0.2, 1.0]):
     inertia = .4 * mass * R ** 2
     sphere_str = None
     with open(os.path.join(os.path.dirname(sys.argv[0]), 'sphere_sdf.template'), 'r') as the_file:
@@ -286,6 +287,24 @@ def make_camera(scene_graph, camera_name: str, frame_id: FrameId, aspect_ratio: 
     )
 
 
+def make_dummy_translational_trajectory(duration: float, X_WL: RigidTransform):
+    num_samples = 100
+    times = np.linspace(0, duration, num_samples)
+
+    positions = []
+    for t in times:
+        positions.append([0, 0, 0, 1])
+
+    positions_local = np.array(positions).T  # 4xN
+    positions_world = X_WL.GetAsMatrix4() @ positions_local
+    positions_world[:-1, :] /= positions_world[-1, :]
+    positions_world = positions_world[:-1, :]
+
+    return PiecewisePolynomial.CubicShapePreserving(
+        times, positions_world, zero_end_point_derivatives=True
+    )
+
+
 def make_figure8_translational_trajectory(duration: float, X_WL: RigidTransform, span: np.array):
     scale = span[1, :] - span[0, :]
     num_samples = 100
@@ -341,6 +360,16 @@ def quaternion_from_vectors(target, source):
     arr /= np.linalg.norm(arr)
     w, x,y,z = arr.tolist()
     return Quaternion(w=w, x=x, y=y, z=z)
+
+
+def make_dummy_roto_trajectory(duration: float):
+    model_lookvec = np.array([0, 0, -1])
+    origin_lookvec = [0, 1, 0]
+    r_LB = quaternion_from_vectors(origin_lookvec, model_lookvec) # To local attitude from Obj-file attitude
+    steps = 8
+    times = np.linspace(0, duration, steps +1).tolist()
+    quats = [r_LB] * len(times)
+    return PiecewiseQuaternionSlerp(times, quats)
 
 
 def make_circular_roto_trajectory(duration: float, translational_t: Trajectory):
@@ -402,14 +431,17 @@ def check_visibility(X_WS: RigidTransform, intrinsics: CameraInfo, p_W: np.array
     fx, fy = intrinsics.focal_x(), intrinsics.focal_y()
     cx, cy = intrinsics.center_x(), intrinsics.center_y()
     p_S = X_WS.inverse() @ p_W
-    K = intrinsics.intrinsic_matrix()
     if p_S[2] <= 0.:
-        return False  # is behind
+        return False, 'behind', (None, None)  # is behind
+
+    K = intrinsics.intrinsic_matrix()
     p_px = K @ p_S
+    p_px /= p_px[2]
     u, v = p_px[:2]
 
-    return 0. <= u and u <= width and \
-           0. <= v and v <= height
+    status = 0. <= u and u <= width and \
+             0. <= v and v <= height
+    return status, 'visible' if status else 'fov', (u,v)
 
 
 class SphereRecolorer(LeafSystem):
@@ -447,25 +479,29 @@ class SphereRecolorer(LeafSystem):
         agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
         X_WA = poses[agents_ind]
         X_WS = X_WA @ self.X_PB @ self.X_BS
-        vis_cnt = 0
+        #print(X_WS.rotation().ToRollPitchYaw(), X_WS.translation())
+        status_cnt = {}
         for model in self.sphere_models:
             ind = self.plant.GetBodyByName('sphere_base', model).index()
             p_WSphere = poses[ind].translation()
-            vis_status = check_visibility(X_WS, self.camera_info, p_WSphere)
+
+            vis_status, step, uv = check_visibility(X_WS, self.camera_info, p_WSphere)
+            status_cnt.setdefault(step, 0)
+            status_cnt[step] += 1
+
             model_name = self.plant.GetModelInstanceName(model)
             path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
             self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
-            vis_cnt += int(vis_status)
 
-        if now % delta < 1e-10:
+        if now % delta < 1e-10 and now > 0.:
             # verbosity happens only during round increments of simulation steps
-            print(f'{now:.4f}, visible: {vis_cnt}')
-
+            print(f'{now:.4f}, {status_cnt}')
             color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
             color_array = color_image.data[:, :, :3]
             fig = plt.figure(figsize=(10, 5.6274))
             ax = fig.subplots(nrows=1, ncols=1)
             ax.imshow(color_array)
+            ax.set_title(f'{now:.4f}')
             fig.savefig(f'frames/{self.tick_counter:07d}.png')
             self.tick_counter += 1
             plt.close(fig)
@@ -512,35 +548,57 @@ def run_sim(args: SimArgs):
         camera.query_object_input_port()
     )
 
-    # plant.set_gravity_enabled(frustum_model, False)
+    plant.set_gravity_enabled(frustum_model, False)
 
     sphere_models = []
-    for id_ in range(args.spheres_count + args.outer_spheres_count):
+
+    if args.is_normal:
+        for id_ in range(args.spheres_count + args.outer_spheres_count):
+            sphere_name = f'sphr_{id_:04d}'
+            sphere_models.append(make_sphere(parser, sphere_name))
+            sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
+            if id_ < args.spheres_count:
+                position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
+            else:
+                position = get_outer_position(args)
+            X_WB = RigidTransform(position)
+            plant.WeldFrames(
+                plant.world_frame(),
+                sphere_body.body_frame(),
+                X_WB,
+            )
+            make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
+    else:
+        id_ = 1
         sphere_name = f'sphr_{id_:04d}'
         sphere_models.append(make_sphere(parser, sphere_name))
         sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
-        if id_ < args.spheres_count:
-            position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
-        else:
-            position = get_outer_position(args)
-        X_WB = RigidTransform(position)
+        t_Obj_W = np.array(args.agent_origin) + [0, 1, 0]
+        X_WB = RigidTransform(t_Obj_W)
         plant.WeldFrames(
-            plant.world_frame(),
-            sphere_body.body_frame(),
-            X_WB,
+                plant.world_frame(),
+                sphere_body.body_frame(),
+                X_WB,
         )
         make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
 
-    R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
-    R_WL1 = RotationMatrix.Identity()
-    t_L_W = args.agent_origin
-    X_WL1 = RigidTransform(R_WL1, t_L_W)
-    X_WL2 = RigidTransform(R_WL2, t_L_W)
+    if args.is_normal:
+        R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+        R_WL1 = RotationMatrix.Identity()
+        t_L_W = args.agent_origin
+        X_WL1 = RigidTransform(R_WL1, t_L_W)
+        X_WL2 = RigidTransform(R_WL2, t_L_W)
 
-    t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, args.agent_span)
-    r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
-    t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
-    visualize_trajectory_with_cylinders(meshcat, positions)
+        t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, args.agent_span)
+        r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
+        t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
+        visualize_trajectory_with_cylinders(meshcat, positions)
+    else:
+        R_WL1 = RotationMatrix.Identity()
+        t_L_W = args.agent_origin
+        X_WL1 = RigidTransform(R_WL1, t_L_W)
+        t = make_dummy_translational_trajectory(args.experiment_duration, X_WL1)
+        r = make_dummy_roto_trajectory(args.experiment_duration)
 
     tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
