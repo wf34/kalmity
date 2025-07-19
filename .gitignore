@@ -4,3 +4,8 @@ output.mp4
 frames
 
 __pycache__/
+
+
+# Added by cargo
+
+/target
