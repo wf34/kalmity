@@ -10,8 +10,10 @@ import string
 import re
 import subprocess
 import random
+from collections import Counter
 
 import numpy as np
+from kalmity import GtObservation, Runtime
 
 from pydot import graph_from_dot_data
 from tap import Tap
@@ -115,6 +117,8 @@ def open_browser_link(replay_browser, meshcat_web_url):
         time.sleep(1.)
 
 
+FRONT = 'front'
+ORACLE = 'oracle'
 class SimArgs(Tap):
     seed: int = 34
     experiment_duration: float = 5.  # in seconds
@@ -127,11 +131,16 @@ class SimArgs(Tap):
     replay_browser: str = 'chromium'
     diagram_destination: str = 'sim_diagram.png'
     is_normal: bool = True
+    with_images: bool = False
+    slam_mode: typing.Literal[ORACLE, FRONT] = ORACLE
 
     def process_args(self):
         self.volume = np.array(self.volume)
         self.volume_outer = np.array(self.volume_outer)
         self.agent_span = np.array(self.agent_span)
+
+        if self.slam_mode == FRONT:
+            raise Exception('yet unsupported')
 
 
 def visualize_trajectory_with_cylinders(meshcat_vis, trajectory_points, line_name="trajectory"):
@@ -444,9 +453,113 @@ def check_visibility(X_WS: RigidTransform, intrinsics: CameraInfo, p_W: np.array
     return status, 'visible' if status else 'fov', (u,v)
 
 
+class VisualObserver(LeafSystem):
+    def __init__(self, args, plant, sphere_models, frustum_model, camera):
+        self.slam_mode = args.slam_mode
+        self.plant = plant
+        self.delta_t = self.plant.time_step()
+        self.sphere_models = sphere_models
+        self.frustum_model = frustum_model
+        self.agents_camera = camera
+
+        if ORACLE != self.slam_mode:
+            raise Exception(f'{self.slam_mode} isn\'t yet supported')
+
+        self.do_images = args.with_images
+
+        self.DeclareAbstractInputPort(
+            'body_poses',
+            model_value=AbstractValue.Make([RigidTransform()])
+        )
+
+        self.DeclareAbstractOutputPort(
+            'gt_visual_observations',
+            lambda: AbstractValue.Make([GtObservation()]),
+            self.set_observations,
+        )
+
+        self.self.DeclarePeriodicPublishEvent(
+                period_sec=self.delta_t,
+                offset_sec=self.delta_t / 2,
+                publish=self.evaluate_visibility)
+
+
+    def initialize(self):
+        print('pip')
+        self.camera_context = camera_context
+        self.color_camera = self.agents_camera.GetColorRenderCamera(self.camera_context)
+        core_camera = self.color_camera.core()
+        self.camera_info = core_camera.intrinsics()
+        self.X_PB = self.agents_camera.GetX_PB(self.camera_context)
+        self.X_BS = core_camera.sensor_pose_in_camera_body()
+        self.X_PS = self.X_PB @ self.X_BS
+
+
+    def evaluate_visibility(self):
+        print('pop')
+        now = context.get_time()
+        delta = self.plant.time_step()
+        poses = self.GetInputPort('body_poses').Eval(context)
+        agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
+        X_WA = poses[agents_ind]
+        X_WS = X_WA @ self.X_PS
+        #print(X_WS.rotation().ToRollPitchYaw(), X_WS.translation())
+
+        status_counts = Counter()
+        observations = []
+        for model in self.sphere_models:
+            print(model)
+            ind = self.plant.GetBodyByName('sphere_base', model).index()
+            p_WSphere = poses[ind].translation()
+
+            vis_status, step, uv = check_visibility(X_WS, self.camera_info, p_WSphere)
+            status_counts[step] += 1
+            if vis_status:
+                pass
+
+
+class FilterBasedNavigation(LeafSystem):
+    def __init__(self, args):
+        self.pose_estimate = None, None
+        self.filter_runtime = Runtime('xx')
+        self.filter_runtime.set_pose_callback(self.pass_pose_to_publish)
+
+        self.DeclareAbstractInputPort(
+            "gt_visual_observations",
+            model_value=AbstractValue.Make([GtObservation()])
+        )
+
+        self.DeclareAbstractOutputPort(
+            "pose_estimate",
+            lambda: AbstractValue.Make(RigidTransform()),
+            self.set_pose_estimate,
+        )
+        self.DeclarePeriodicPublishEvent(
+            period_sec=update_period,
+            offset_sec=0.0,
+            publish=self.publish
+        )
+
+    def set_pose_estimate(self, context, output):
+        last_pose_time, X_WAest = self.pose_estimate
+        if last_pose_time is None or X_WAest is None:
+            pass
+
+        print(f'set_pose_estimate: now{now:.3f}, has pose from: {last_pose_time:.3f}')
+        output.SetValue(self.pose_estimate)
+
+    def pass_pose_to_publish(self):
+        print('we are being provided with pose')
+        # goes to pose buffer
+
+    def publish(self, context):
+        # pass from the pose buffer to `self.pose_estimate`
+        pass
+
+
 class SphereRecolorer(LeafSystem):
 
-    def __init__(self, meshcat, plant, sphere_models, frustum_model, camera):
+    def __init__(self, args, meshcat, plant, sphere_models, frustum_model, camera):
         LeafSystem.__init__(self)
         self.meshcat = meshcat
         self.plant = plant
@@ -455,11 +568,11 @@ class SphereRecolorer(LeafSystem):
         self.agents_camera = camera
 
         self.DeclareAbstractInputPort(
-            "body_poses",
-            model_value=AbstractValue.Make([RigidTransform()])
+            "gt_visual_observations",
+            model_value=AbstractValue.Make([GtObservation()])
         )
 
-        self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
+        # self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
         self.tick_counter = 0
 
 
@@ -472,7 +585,23 @@ class SphereRecolorer(LeafSystem):
         self.X_BS = core_camera.sensor_pose_in_camera_body()
 
 
+    def query_image_and_store_on_drive(self, now: float):
+        if not self.do_images:
+            return
+
+        color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
+        color_array = color_image.data[:, :, :3]
+        fig = plt.figure(figsize=(10, 5.6274))
+        ax = fig.subplots(nrows=1, ncols=1)
+        ax.imshow(color_array)
+        ax.set_title(f'{now:.4f}')
+        fig.savefig(f'frames/{self.tick_counter:07d}.png')
+        self.tick_counter += 1
+        plt.close(fig)
+
+
     def calc_recoloring(self, context, state):
+
         now = context.get_time()
         delta = self.plant.time_step()
         poses = self.GetInputPort('body_poses').Eval(context)
@@ -493,18 +622,10 @@ class SphereRecolorer(LeafSystem):
             path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
             self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
 
+        # visual output happens only during round increments of simulation steps
         if now % delta < 1e-10 and now > 0.:
-            # verbosity happens only during round increments of simulation steps
             print(f'{now:.4f}, {status_cnt}')
-            color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
-            color_array = color_image.data[:, :, :3]
-            fig = plt.figure(figsize=(10, 5.6274))
-            ax = fig.subplots(nrows=1, ncols=1)
-            ax.imshow(color_array)
-            ax.set_title(f'{now:.4f}')
-            fig.savefig(f'frames/{self.tick_counter:07d}.png')
-            self.tick_counter += 1
-            plt.close(fig)
+            self.query_image_and_store_on_drive(now)
 
 
 def get_outer_position(args) -> np.array:
@@ -604,8 +725,14 @@ def run_sim(args: SimArgs):
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
     frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
-    recolorer = builder.AddSystem(SphereRecolorer(
-        meshcat, plant, sphere_models, frustum_model, camera))
+
+    #visual_observer = builder.AddSystem(VisualObserver(
+    #    args, plant, sphere_models, frustum_model, camera))
+
+    navigation_system = builder.AddSystem(FilterBasedNavigation(args))
+
+    #recolorer = builder.AddSystem(SphereRecolorer(
+    #    args, meshcat, plant, sphere_models, frustum_model, camera))
 
     plant.Finalize()
 
@@ -619,10 +746,15 @@ def run_sim(args: SimArgs):
         frustum_mover.GetInputPort('commanded_orientation')
     )
 
-    builder.Connect(
-        plant.get_body_poses_output_port(),
-        recolorer.GetInputPort('body_poses')
-    )
+    #builder.Connect(
+    #    plant.get_body_poses_output_port(),
+    #    visual_observer.GetInputPort('body_poses')
+    #)
+
+    #builder.Connect(
+    #    visual_observer.GetOutputPort('gt_visual_observations'),
+    #    navigation_system.GetInputPort('gt_visual_observations')
+    #)
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
@@ -636,7 +768,7 @@ def run_sim(args: SimArgs):
     plant_context = diagram.GetMutableSubsystemContext(plant, simulator.get_mutable_context())
     frustum_mover.Initialize(plant_context)
     camera_context = diagram.GetMutableSubsystemContext(camera_system, simulator.get_mutable_context())
-    recolorer.initialize(camera_context)
+    # recolorer.initialize(camera_context)
 
     simulator.AdvanceTo(args.experiment_duration)
     meshcat.PublishRecording()
