@@ -5,8 +5,11 @@ const INVALID_ID_ENTRY: u32 = u32::MAX;
 
 #[pyclass]
 pub struct GtObservation {
+    #[pyo3(get)]
     pub ts : f32,
+    #[pyo3(get)]
     pub id : u32,
+    #[pyo3(get)]
     pub xy : (f32, f32),
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from multiprocessing import Process
+import re
 import sys
 import typing
 import math
@@ -58,6 +59,14 @@ from pydrake.all import (
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
 
 SIM_DELTA_T = 3.e-2
+
+def parse_id_from_sphere_name(name: str) -> int:
+    reprog = re.compile(r'^sphr_(\d{4})$')
+    res = reprog.match(name)
+    if not res:
+        raise Exception(f'this sphere does not match: {name}')
+    else:
+       return int(res.group(1))
 
 def raise_browser_for_meshcat(browser, target_url, comm_filename):
     print(f'Meshcat is now available at {target_url}')
@@ -454,22 +463,22 @@ def check_visibility(X_WS: RigidTransform, intrinsics: CameraInfo, p_W: np.array
 
 
 class VisualObserver(LeafSystem):
-    def __init__(self, args, plant, sphere_models, frustum_model, camera):
+    def __init__(self, args, plant, sphere_names, frustum_model, camera):
+        LeafSystem.__init__(self)
+        self.with_images = args.with_images
         self.slam_mode = args.slam_mode
         self.plant = plant
         self.delta_t = self.plant.time_step()
-        self.sphere_models = sphere_models
+        self.sphere_names = sphere_names
         self.frustum_model = frustum_model
         self.agents_camera = camera
 
         if ORACLE != self.slam_mode:
             raise Exception(f'{self.slam_mode} isn\'t yet supported')
 
-        self.do_images = args.with_images
-
         self.DeclareAbstractInputPort(
             'body_poses',
-            model_value=AbstractValue.Make([RigidTransform()])
+            AbstractValue.Make([RigidTransform()])
         )
 
         self.DeclareAbstractOutputPort(
@@ -478,14 +487,13 @@ class VisualObserver(LeafSystem):
             self.set_observations,
         )
 
-        self.self.DeclarePeriodicPublishEvent(
-                period_sec=self.delta_t,
-                offset_sec=self.delta_t / 2,
-                publish=self.evaluate_visibility)
+        self.DeclarePeriodicPublishEvent(
+            period_sec=self.delta_t,
+            offset_sec=self.delta_t / 2,
+            publish=self.evaluate_visibility)
 
 
-    def initialize(self):
-        print('pip')
+    def initialize(self, camera_context):
         self.camera_context = camera_context
         self.color_camera = self.agents_camera.GetColorRenderCamera(self.camera_context)
         core_camera = self.color_camera.core()
@@ -494,9 +502,13 @@ class VisualObserver(LeafSystem):
         self.X_BS = core_camera.sensor_pose_in_camera_body()
         self.X_PS = self.X_PB @ self.X_BS
 
+    def set_observations(self, context, output):
+        output.set_value(self.observations)
 
-    def evaluate_visibility(self):
-        print('pop')
+    def evaluate_visibility(self, context):
+        if not hasattr(self, 'X_PS'):
+            raise Exception(f'{self.__class__.__name__} was not initialized')
+
         now = context.get_time()
         delta = self.plant.time_step()
         poses = self.GetInputPort('body_poses').Eval(context)
@@ -506,16 +518,17 @@ class VisualObserver(LeafSystem):
         #print(X_WS.rotation().ToRollPitchYaw(), X_WS.translation())
 
         status_counts = Counter()
-        observations = []
-        for model in self.sphere_models:
-            print(model)
-            ind = self.plant.GetBodyByName('sphere_base', model).index()
+        self.observations = []
+        for sphere_name in self.sphere_names:
+            sphere_id = parse_id_from_sphere_name(sphere_name)
+            model_index = self.plant.GetModelInstanceByName(sphere_name)
+            ind = self.plant.GetBodyByName('sphere_base', model_index).index()
             p_WSphere = poses[ind].translation()
 
             vis_status, step, uv = check_visibility(X_WS, self.camera_info, p_WSphere)
             status_counts[step] += 1
             if vis_status:
-                pass
+                self.observations.append(GtObservation(now, sphere_id, uv))
 
 
 class FilterBasedNavigation(LeafSystem):
@@ -672,10 +685,12 @@ def run_sim(args: SimArgs):
     plant.set_gravity_enabled(frustum_model, False)
 
     sphere_models = []
+    sphere_names = []
 
     if args.is_normal:
         for id_ in range(args.spheres_count + args.outer_spheres_count):
-            sphere_name = f'sphr_{id_:04d}'
+            sphere_names.append(f'sphr_{id_:04d}')
+            sphere_name = sphere_names[-1]
             sphere_models.append(make_sphere(parser, sphere_name))
             sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
             if id_ < args.spheres_count:
@@ -692,6 +707,7 @@ def run_sim(args: SimArgs):
     else:
         id_ = 1
         sphere_name = f'sphr_{id_:04d}'
+        sphere_names.append(sphere_name)
         sphere_models.append(make_sphere(parser, sphere_name))
         sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
         t_Obj_W = np.array(args.agent_origin) + [0, 1, 0]
@@ -726,10 +742,10 @@ def run_sim(args: SimArgs):
 
     frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
 
-    #visual_observer = builder.AddSystem(VisualObserver(
-    #    args, plant, sphere_models, frustum_model, camera))
+    visual_observer = builder.AddSystem(VisualObserver(
+        args, plant, sphere_names, frustum_model, camera))
 
-    navigation_system = builder.AddSystem(FilterBasedNavigation(args))
+    # navigation_system = builder.AddSystem(FilterBasedNavigation(args))
 
     #recolorer = builder.AddSystem(SphereRecolorer(
     #    args, meshcat, plant, sphere_models, frustum_model, camera))
@@ -746,10 +762,10 @@ def run_sim(args: SimArgs):
         frustum_mover.GetInputPort('commanded_orientation')
     )
 
-    #builder.Connect(
-    #    plant.get_body_poses_output_port(),
-    #    visual_observer.GetInputPort('body_poses')
-    #)
+    builder.Connect(
+        plant.get_body_poses_output_port(),
+        visual_observer.GetInputPort('body_poses')
+    )
 
     #builder.Connect(
     #    visual_observer.GetOutputPort('gt_visual_observations'),
@@ -768,7 +784,7 @@ def run_sim(args: SimArgs):
     plant_context = diagram.GetMutableSubsystemContext(plant, simulator.get_mutable_context())
     frustum_mover.Initialize(plant_context)
     camera_context = diagram.GetMutableSubsystemContext(camera_system, simulator.get_mutable_context())
-    # recolorer.initialize(camera_context)
+    visual_observer.initialize(camera_context)
 
     simulator.AdvanceTo(args.experiment_duration)
     meshcat.PublishRecording()
