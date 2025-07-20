@@ -59,6 +59,13 @@ from pydrake.all import (
 from make_frustum_mesh import create_rectangular_frustum_mesh_file
 
 SIM_DELTA_T = 3.e-2
+IMU_FREQ = 500.
+IMU_PERIOD = 1. / IMU_FREQ
+
+
+def make_sphere_name_from_id(id_: int) -> str:
+    return f'sphr_{id_:04d}'
+
 
 def parse_id_from_sphere_name(name: str) -> int:
     reprog = re.compile(r'^sphr_(\d{4})$')
@@ -67,6 +74,7 @@ def parse_id_from_sphere_name(name: str) -> int:
         raise Exception(f'this sphere does not match: {name}')
     else:
        return int(res.group(1))
+
 
 def raise_browser_for_meshcat(browser, target_url, comm_filename):
     print(f'Meshcat is now available at {target_url}')
@@ -472,6 +480,8 @@ class VisualObserver(LeafSystem):
         self.sphere_names = sphere_names
         self.frustum_model = frustum_model
         self.agents_camera = camera
+        self.observations = []
+        self.tick_counter = 0
 
         if ORACLE != self.slam_mode:
             raise Exception(f'{self.slam_mode} isn\'t yet supported')
@@ -530,76 +540,12 @@ class VisualObserver(LeafSystem):
             if vis_status:
                 self.observations.append(GtObservation(now, sphere_id, uv))
 
-
-class FilterBasedNavigation(LeafSystem):
-    def __init__(self, args):
-        self.pose_estimate = None, None
-        self.filter_runtime = Runtime('xx')
-        self.filter_runtime.set_pose_callback(self.pass_pose_to_publish)
-
-        self.DeclareAbstractInputPort(
-            "gt_visual_observations",
-            model_value=AbstractValue.Make([GtObservation()])
-        )
-
-        self.DeclareAbstractOutputPort(
-            "pose_estimate",
-            lambda: AbstractValue.Make(RigidTransform()),
-            self.set_pose_estimate,
-        )
-        self.DeclarePeriodicPublishEvent(
-            period_sec=update_period,
-            offset_sec=0.0,
-            publish=self.publish
-        )
-
-    def set_pose_estimate(self, context, output):
-        last_pose_time, X_WAest = self.pose_estimate
-        if last_pose_time is None or X_WAest is None:
-            pass
-
-        print(f'set_pose_estimate: now{now:.3f}, has pose from: {last_pose_time:.3f}')
-        output.SetValue(self.pose_estimate)
-
-    def pass_pose_to_publish(self):
-        print('we are being provided with pose')
-        # goes to pose buffer
-
-    def publish(self, context):
-        # pass from the pose buffer to `self.pose_estimate`
-        pass
-
-
-class SphereRecolorer(LeafSystem):
-
-    def __init__(self, args, meshcat, plant, sphere_models, frustum_model, camera):
-        LeafSystem.__init__(self)
-        self.meshcat = meshcat
-        self.plant = plant
-        self.sphere_models = sphere_models
-        self.frustum_model = frustum_model
-        self.agents_camera = camera
-
-        self.DeclareAbstractInputPort(
-            "gt_visual_observations",
-            model_value=AbstractValue.Make([GtObservation()])
-        )
-
-        # self.DeclarePerStepDiscreteUpdateEvent(self.calc_recoloring)
-        self.tick_counter = 0
-
-
-    def initialize(self, camera_context):
-        self.camera_context = camera_context
-        self.color_camera = self.agents_camera.GetColorRenderCamera(self.camera_context)
-        core_camera = self.color_camera.core()
-        self.camera_info = core_camera.intrinsics()
-        self.X_PB = self.agents_camera.GetX_PB(self.camera_context)
-        self.X_BS = core_camera.sensor_pose_in_camera_body()
-
+        ordered_status_counts = list(map(lambda x: (x, status_counts[x]), sorted(status_counts.keys())))
+        print(f'{now:.4f}, {ordered_status_counts}')
+        self.query_image_and_store_on_drive(now)
 
     def query_image_and_store_on_drive(self, now: float):
-        if not self.do_images:
+        if not self.with_images:
             return
 
         color_image = self.agents_camera.color_image_output_port().Eval(self.camera_context)
@@ -613,32 +559,84 @@ class SphereRecolorer(LeafSystem):
         plt.close(fig)
 
 
+class FilterBasedNavigation(LeafSystem):
+    def __init__(self, args):
+        LeafSystem.__init__(self)
+        self.pose_estimate = None, None
+        self.pose_buffer = []
+
+        self.filter_runtime = Runtime('xx')
+        self.filter_runtime.set_pose_callback(self.store_pose_estimate)
+
+        self.DeclareAbstractInputPort(
+            "gt_visual_observations",
+            model_value=AbstractValue.Make([GtObservation()])
+        )
+
+        self.DeclareAbstractOutputPort(
+            "pose_estimate",
+            lambda: AbstractValue.Make(RigidTransform()),
+            self.set_pose_estimate,
+        )
+        self.DeclarePeriodicPublishEvent(
+            period_sec=IMU_PERIOD,
+            offset_sec=0.0,
+            publish=self.publish
+        )
+
+    def set_pose_estimate(self, context, output):
+        last_pose_time, X_WAest = self.pose_estimate
+        if last_pose_time is None or X_WAest is None:
+            pass
+
+        print(f'set_pose_estimate: now{now:.3f}, has pose from: {last_pose_time:.3f}')
+        output.SetValue(self.pose_estimate)
+
+    def store_pose_estimate(self):
+        print('we are being provided with pose')
+        # goes to pose buffer
+        # self.pose_buffer.append()
+
+    def publish(self, context):
+        # pass from the pose buffer to `self.pose_estimate`
+        pass
+
+
+class SphereRecolorer(LeafSystem):
+    def __init__(self, meshcat, plant, sphere_names):
+        LeafSystem.__init__(self)
+        self.meshcat = meshcat
+        self.plant = plant
+        self.full_sphere_names = set(sphere_names)
+
+        self.input_obs_port = self.DeclareAbstractInputPort(
+            "gt_visual_observations",
+            model_value=AbstractValue.Make([GtObservation()])
+        )
+        self.DeclarePerStepUnrestrictedUpdateEvent(self.calc_recoloring)
+
+    def change_vis_property(self, time_now, status, model_name):
+        path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
+        self.meshcat.SetProperty(path, "visible", status, time_in_recording=time_now)
+
     def calc_recoloring(self, context, state):
+        if not self.input_obs_port.HasValue(context):
+            return
+        observations = self.input_obs_port.Eval(context)
+        if observations is None:
+            return
 
         now = context.get_time()
-        delta = self.plant.time_step()
-        poses = self.GetInputPort('body_poses').Eval(context)
-        agents_ind = self.plant.GetBodyByName('base_link', self.frustum_model).index()
-        X_WA = poses[agents_ind]
-        X_WS = X_WA @ self.X_PB @ self.X_BS
-        #print(X_WS.rotation().ToRollPitchYaw(), X_WS.translation())
-        status_cnt = {}
-        for model in self.sphere_models:
-            ind = self.plant.GetBodyByName('sphere_base', model).index()
-            p_WSphere = poses[ind].translation()
+        visible_spheres = set([])
 
-            vis_status, step, uv = check_visibility(X_WS, self.camera_info, p_WSphere)
-            status_cnt.setdefault(step, 0)
-            status_cnt[step] += 1
+        for obs in observations:
+            assert obs.ts < now + 1.e-6, f'observation={obs.ts:.6f} now={now:.6f}'
+            model_name = make_sphere_name_from_id(obs.id)
+            visible_spheres.add(model_name)
+            self.change_vis_property(now, True, model_name)
 
-            model_name = self.plant.GetModelInstanceName(model)
-            path = f'visualizer/{model_name}/sphere_base/{model_name}/sphere_base_vis'
-            self.meshcat.SetProperty(path, "visible", vis_status, time_in_recording=context.get_time())
-
-        # visual output happens only during round increments of simulation steps
-        if now % delta < 1e-10 and now > 0.:
-            print(f'{now:.4f}, {status_cnt}')
-            self.query_image_and_store_on_drive(now)
+        for unseen_model_name in self.full_sphere_names-visible_spheres:
+            self.change_vis_property(now, False, unseen_model_name)
 
 
 def get_outer_position(args) -> np.array:
@@ -684,15 +682,14 @@ def run_sim(args: SimArgs):
 
     plant.set_gravity_enabled(frustum_model, False)
 
-    sphere_models = []
     sphere_names = []
 
     if args.is_normal:
         for id_ in range(args.spheres_count + args.outer_spheres_count):
-            sphere_names.append(f'sphr_{id_:04d}')
+            sphere_names.append(make_sphere_name_from_id(id_))
             sphere_name = sphere_names[-1]
-            sphere_models.append(make_sphere(parser, sphere_name))
-            sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
+            sphere_model =make_sphere(parser, sphere_name)
+            sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
             if id_ < args.spheres_count:
                 position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
             else:
@@ -706,10 +703,10 @@ def run_sim(args: SimArgs):
             make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
     else:
         id_ = 1
-        sphere_name = f'sphr_{id_:04d}'
+        sphere_name = make_sphere_name_from_id(id_)
         sphere_names.append(sphere_name)
-        sphere_models.append(make_sphere(parser, sphere_name))
-        sphere_body = plant.GetBodyByName('sphere_base', sphere_models[-1])
+        sphere_model = make_sphere(parser, sphere_name)
+        sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
         t_Obj_W = np.array(args.agent_origin) + [0, 1, 0]
         X_WB = RigidTransform(t_Obj_W)
         plant.WeldFrames(
@@ -745,32 +742,34 @@ def run_sim(args: SimArgs):
     visual_observer = builder.AddSystem(VisualObserver(
         args, plant, sphere_names, frustum_model, camera))
 
-    # navigation_system = builder.AddSystem(FilterBasedNavigation(args))
-
-    #recolorer = builder.AddSystem(SphereRecolorer(
-    #    args, meshcat, plant, sphere_models, frustum_model, camera))
+    navigation_system = builder.AddSystem(FilterBasedNavigation(args))
+    recolorer = builder.AddSystem(SphereRecolorer(meshcat, plant, sphere_names))
 
     plant.Finalize()
 
     builder.Connect(
         tr_trajectory_source.get_output_port(0),
-        frustum_mover.GetInputPort('commanded_translation')
+        frustum_mover.GetInputPort('commanded_translation'),
     )
 
     builder.Connect(
         ro_trajectory_source.get_output_port(0),
-        frustum_mover.GetInputPort('commanded_orientation')
+        frustum_mover.GetInputPort('commanded_orientation'),
     )
 
     builder.Connect(
         plant.get_body_poses_output_port(),
-        visual_observer.GetInputPort('body_poses')
+        visual_observer.GetInputPort('body_poses'),
     )
 
-    #builder.Connect(
-    #    visual_observer.GetOutputPort('gt_visual_observations'),
-    #    navigation_system.GetInputPort('gt_visual_observations')
-    #)
+    builder.Connect(
+        visual_observer.GetOutputPort('gt_visual_observations'),
+        navigation_system.GetInputPort('gt_visual_observations'),
+    )
+    builder.Connect(
+        visual_observer.GetOutputPort('gt_visual_observations'),
+        recolorer.GetInputPort('gt_visual_observations'),
+    )
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
