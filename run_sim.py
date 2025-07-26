@@ -14,7 +14,7 @@ import random
 from collections import Counter, deque
 
 import numpy as np
-from kalmity import GtObservation, Runtime
+from kalmity import GtObservation, InertialMeasurement, Runtime
 
 from pydot import graph_from_dot_data
 from tap import Tap
@@ -22,6 +22,9 @@ from tap import Tap
 import matplotlib.pyplot as plt
 
 from pydrake.all import (
+    # BasicVector,
+    # Accelerometer,
+    # Gyroscope,
     RenderEngineVtkParams,
     MakeRenderEngineVtk,
     RenderEngineVtkParams,
@@ -150,6 +153,7 @@ class SimArgs(Tap):
     diagram_destination: str = 'sim_diagram.png'
     is_normal: bool = True
     with_images: bool = False
+    use_real_imu: bool = False
     slam_mode: typing.Literal[ORACLE, FRONT] = ORACLE
 
     def process_args(self):
@@ -312,6 +316,37 @@ def make_camera(scene_graph, camera_name: str, frame_id: FrameId, aspect_ratio: 
         color_camera=color_camera,
         depth_camera=depth_camera,
     )
+
+
+def add_imu_sensor(args, builder, plant, agents_body, t, r):
+    if args.use_real_imu:
+        X_B_Imu = RigidTransform(
+            RotationMatrix.Identity(),
+            np.array([0.0, 0.0, 0.1])
+        )
+
+        accelerometer = builder.AddSystem(Accelerometer(
+            body=body,
+            X_BS=X_B_Imu,
+            gravity_vector=np.array([0.0, 0.0, -9.81])
+        ))
+        gyroscope = builder.AddSystem(Gyroscope(
+            body=body,
+            X_BS=X_B_Imu
+        ))
+
+        builder.Connect(
+            plant.get_state_output_port(),
+            accelerometer.get_input_port()
+        )
+        builder.Connect(
+            plant.get_state_output_port(),
+            gyroscope.get_input_port()
+        )
+        raise Exception('isnt implemented')
+
+    else:
+        return builder.AddSystem(ImuSensor(args.use_real_imu, t=t, r=r))
 
 
 def make_dummy_translational_trajectory(duration: float, X_WL: RigidTransform):
@@ -560,6 +595,45 @@ class VisualObserver(LeafSystem):
         plt.close(fig)
 
 
+class ImuSensor(LeafSystem):
+    def __init__(self, use_real_imu: bool, gyroscope=None, accelerometer=None, t=None, r=None):
+        LeafSystem.__init__(self)
+        if use_real_imu:
+            assert gyroscope is not None
+            assert accelerometer is not None
+
+            self.gyroscope = gyroscope
+            self.accelerometer = accelerometer
+
+            self.input_accel_port = self.DeclareVectorInputPort("acceleration", BasicVector(3))
+            self.input_angular_port = self.DeclareVectorInputPort("angular_rate", BasicVector(3))
+        else:
+            assert t is not None
+            assert r is not None
+            self.acceleration = t.MakeDerivative(derivative_order=2)
+            self.angular_rate = r.MakeDerivative()
+
+        self.DeclareAbstractOutputPort(
+            'inertial_measurement',
+            lambda: AbstractValue.Make(InertialMeasurement),
+            self.make_inertial_measurement,
+        )
+
+    def make_inertial_measurement(self, context, output):
+        now = context.get_time()
+        # print(f'imu {now:.3f}, {self.input_accel_port.HasValue(context)} {self.input_angular_port.HasValue(context)}')
+        a = self.acceleration.value(now).ravel().tolist()
+        a = (*a,)
+        w = self.angular_rate.value(now).ravel().tolist()
+        w = (*w,)
+        output.set_value(InertialMeasurement(time = now, gyro=w, accel=a))
+
+        #if not self.input_accel_port.HasValue(context) or:
+        #    return
+
+        # self.input_accel_port.Eval(context)
+
+
 class FilterBasedNavigation(LeafSystem):
     def __init__(self, args):
         LeafSystem.__init__(self)
@@ -572,6 +646,11 @@ class FilterBasedNavigation(LeafSystem):
         self.vis_obs_port = self.DeclareAbstractInputPort(
             "gt_visual_observations",
             model_value=AbstractValue.Make([GtObservation()])
+        )
+
+        self.input_imu_port = self.DeclareAbstractInputPort(
+            "inertial_measurement",
+            model_value=AbstractValue.Make([InertialMeasurement()])
         )
 
         self.DeclareAbstractOutputPort(
@@ -611,6 +690,11 @@ class FilterBasedNavigation(LeafSystem):
     def fetch_solutions(self, context):
         # pass from the pose buffer to `self.pose_estimate`
         now = context.get_time()
+
+        if  self.input_imu_port.HasValue(context):
+            imu_mes = self.input_imu_port.Eval(context)
+            if imu_mes is not None:
+                self.filter_runtime.add_inertial_measurement(imu_mes)
 
         arg_min = None
         min_time_offset = None
@@ -707,8 +791,8 @@ def run_sim(args: SimArgs):
 
     frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio, hfov=hfov)
     frustum_body = plant.GetBodyByName('base_link', frustum_model)
-    body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
-    camera = make_camera(scene_graph, camera_name, body_frame_id, aspect_ratio, hfov)
+    agents_body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
+    camera = make_camera(scene_graph, camera_name, agents_body_frame_id, aspect_ratio, hfov)
 
     camera_system = builder.AddSystem(camera)
     builder.Connect(
@@ -771,6 +855,8 @@ def run_sim(args: SimArgs):
         t = make_dummy_translational_trajectory(args.experiment_duration, X_WL1)
         r = make_dummy_roto_trajectory(args.experiment_duration)
 
+    imu_system = add_imu_sensor(args, builder, plant, frustum_body, t, r)
+
     tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
@@ -806,6 +892,10 @@ def run_sim(args: SimArgs):
     builder.Connect(
         visual_observer.GetOutputPort('gt_visual_observations'),
         recolorer.GetInputPort('gt_visual_observations'),
+    )
+    builder.Connect(
+        imu_system.GetOutputPort('inertial_measurement'),
+        navigation_system.GetInputPort('inertial_measurement'),
     )
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
