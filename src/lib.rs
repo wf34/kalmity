@@ -4,29 +4,20 @@ use pyo3::types::PyList;
 use pyo3::types::PyTuple;
 
 pub mod oracle;
+pub mod measurement;
 pub mod front;
 
 use crate::oracle::GtObservation;
+use crate::measurement::InertialMeasurement;
 
 #[pyclass]
 struct Runtime {
-    fake_state: String,
+    label: String,
     pose_callback: Option<PyObject>,
-    counter: i32,
 }
 
 #[pymethods]
 impl Runtime {
-    fn hello_world(&mut self) {
-        println!("The measurement is: {}", self.fake_state);
-
-        if 0 == self.counter % 10 {
-            let _ = self.trigger_pose_callback();
-        }
-
-        self.counter += 1;
-    }
-
     fn set_pose_callback(&mut self, callback: PyObject) {
         self.pose_callback = Some(callback);
     }
@@ -50,21 +41,27 @@ impl Runtime {
         }
     }
 
+    fn add_inertial_measurement(&self, _observation: &InertialMeasurement) {
+        let x = _observation.ts;
+        println!("{0} got IMU {x}", self.label);
+    }
+
     fn add_observation(&self, observation: &GtObservation) {
         let x = observation.ts;
-        println!("got obs {x}");
+        println!("{0} got obs {x}", self.label);
     }
 
     #[new]
-    fn new(a: String) -> Self {
-        Runtime{fake_state: a, pose_callback: None, counter: 0}
+    fn new(label: String) -> Self {
+        println!("creates kalmity runtime {label}");
+        Runtime{label: label, pose_callback: None}
     }
 }
 
-/// A Python module implemented in Rust.
 #[pymodule]
 fn kalmity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Runtime>()?;
     m.add_class::<GtObservation>()?;
+    m.add_class::<InertialMeasurement>()?;
     Ok(())
 }
