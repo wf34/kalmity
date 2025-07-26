@@ -11,7 +11,7 @@ import string
 import re
 import subprocess
 import random
-from collections import Counter
+from collections import Counter, deque
 
 import numpy as np
 from kalmity import GtObservation, Runtime
@@ -61,6 +61,7 @@ from make_frustum_mesh import create_rectangular_frustum_mesh_file
 SIM_DELTA_T = 3.e-2
 IMU_FREQ = 500.
 IMU_PERIOD = 1. / IMU_FREQ
+VISUAL_PERIOD = SIM_DELTA_T
 
 
 def make_sphere_name_from_id(id_: int) -> str:
@@ -563,12 +564,12 @@ class FilterBasedNavigation(LeafSystem):
     def __init__(self, args):
         LeafSystem.__init__(self)
         self.pose_estimate = None, None
-        self.pose_buffer = []
+        self.pose_buffer = deque(maxlen=100)
 
         self.filter_runtime = Runtime('xx')
         self.filter_runtime.set_pose_callback(self.store_pose_estimate)
 
-        self.DeclareAbstractInputPort(
+        self.vis_obs_port = self.DeclareAbstractInputPort(
             "gt_visual_observations",
             model_value=AbstractValue.Make([GtObservation()])
         )
@@ -578,10 +579,18 @@ class FilterBasedNavigation(LeafSystem):
             lambda: AbstractValue.Make(RigidTransform()),
             self.set_pose_estimate,
         )
+
+        print(f'`FilterBasedNavigation` imu period is {IMU_PERIOD:.3f}, vis period: {VISUAL_PERIOD:.3f}')
         self.DeclarePeriodicPublishEvent(
             period_sec=IMU_PERIOD,
             offset_sec=0.0,
-            publish=self.publish
+            publish=self.fetch_solutions
+        )
+
+        self.DeclarePeriodicPublishEvent(
+            period_sec=VISUAL_PERIOD,
+            offset_sec=0.0,
+            publish=self.communicate_observations
         )
 
     def set_pose_estimate(self, context, output):
@@ -592,14 +601,41 @@ class FilterBasedNavigation(LeafSystem):
         print(f'set_pose_estimate: now{now:.3f}, has pose from: {last_pose_time:.3f}')
         output.SetValue(self.pose_estimate)
 
-    def store_pose_estimate(self):
+    def store_pose_estimate(self, timestamp_and_slam_pose_estimate: typing.List[float]):
         print('we are being provided with pose')
-        # goes to pose buffer
-        # self.pose_buffer.append()
+        assert 8 == len(timestamp_and_slam_pose_estimate)
+        timestamp = timestamp_and_slam_pose_estimate[0]
+        slam_pose_estimate = timestamp_and_slam_pose_estimate[1:]
+        self.pose_buffer.append((timestamp, slam_pose_estimate))
 
-    def publish(self, context):
+    def fetch_solutions(self, context):
         # pass from the pose buffer to `self.pose_estimate`
-        pass
+        now = context.get_time()
+
+        arg_min = None
+        min_time_offset = None
+
+        for i in range(len(self.pose_buffer)):
+            ts, pose = self.pose_buffer[i]
+            offset = math.fabs(ts - now)
+            if min_time_offset is None or offset < min_time_offset:
+                min_time_offset = offset
+                arg_min = i
+
+        if arg_min is not None:
+            self.pose_estimate = self.pose_buffer[arg_min]
+
+    def communicate_observations(self, context):
+        now = context.get_time()
+        if not self.vis_obs_port.HasValue(context):
+            return
+        observations = self.vis_obs_port.Eval(context)
+        if observations is None:
+            return
+
+        for obs in observations:
+            assert obs.ts < now + 1.e-6, f'observation={obs.ts:.6f} now={now:.6f}'
+            self.filter_runtime.add_observation(obs)
 
 
 class SphereRecolorer(LeafSystem):
@@ -727,6 +763,7 @@ def run_sim(args: SimArgs):
         r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
         t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
         visualize_trajectory_with_cylinders(meshcat, positions)
+
     else:
         R_WL1 = RotationMatrix.Identity()
         t_L_W = args.agent_origin

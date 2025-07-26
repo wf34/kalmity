@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
 
+use pyo3::types::PyList;
+use pyo3::types::PyTuple;
+
 pub mod oracle;
 pub mod front;
 
@@ -31,9 +34,10 @@ impl Runtime {
     fn trigger_pose_callback(&self) -> PyResult<()> {
         if let Some(this_callback) = &self.pose_callback {
              Python::with_gil(|py| {
-                 // let args = PyTuple::new(py, &[value]);
-                 // call1(py, args)
-                 match this_callback.call0(py) {
+                 let rust_array = vec![0.0, 1.0, 2.5, 3.7, 4.2, 0., 0., 0.];
+                 let ts_and_pose = PyList::new(py, rust_array)?;
+                 let args = PyTuple::new(py, ts_and_pose)?;
+                 match this_callback.call1(py, args) {
                      Ok(_) => Ok(()),
                      Err(e) => {
                          eprintln!("Pose callback error: {}", e);
