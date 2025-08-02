@@ -48,6 +48,7 @@ from pydrake.all import (
     RgbdSensor,
     RenderCameraCore,
     ColorRenderCamera,
+    Box,
     Cylinder,
     DepthRenderCamera,
     DepthRange,
@@ -675,17 +676,19 @@ class FilterBasedNavigation(LeafSystem):
     def set_pose_estimate(self, context, output):
         last_pose_time, X_WAest = self.pose_estimate
         if last_pose_time is None or X_WAest is None:
-            pass
-
-        print(f'set_pose_estimate: now{now:.3f}, has pose from: {last_pose_time:.3f}')
-        output.SetValue(self.pose_estimate)
+            return
+        now = context.get_time()
+        print(f'set_pose_estimate/ now: {now:.3f}, estimate\'s time: {last_pose_time:.3f}')
+        output.set_value(X_WAest)
 
     def store_pose_estimate(self, timestamp_and_slam_pose_estimate: typing.List[float]):
-        print('we are being provided with pose')
         assert 8 == len(timestamp_and_slam_pose_estimate)
         timestamp = timestamp_and_slam_pose_estimate[0]
         slam_pose_estimate = timestamp_and_slam_pose_estimate[1:]
-        self.pose_buffer.append((timestamp, slam_pose_estimate))
+        q = slam_pose_estimate[:4]
+        qq = Quaternion(w=q[0], x=q[1], y=q[2], z=q[3])
+        t = slam_pose_estimate[-3:]
+        self.pose_buffer.append((timestamp, RigidTransform(qq, t)))
 
     def fetch_solutions(self, context):
         # pass from the pose buffer to `self.pose_estimate`
@@ -757,6 +760,35 @@ class SphereRecolorer(LeafSystem):
 
         for unseen_model_name in self.full_sphere_names-visible_spheres:
             self.change_vis_property(now, False, unseen_model_name)
+
+
+class NavEstimateVisualizer(LeafSystem):
+    def __init__(self, meshcat):
+        LeafSystem.__init__(self)
+        self.meshcat_vis = meshcat
+        self.counter = 0
+
+        self.input_port = self.DeclareAbstractInputPort(
+            'pose_estimate',
+            AbstractValue.Make(RigidTransform())
+        )
+        self.DeclarePerStepUnrestrictedUpdateEvent(self.process_nav_estimate)
+
+    def process_nav_estimate(self, context, state):
+        if not self.input_port.HasValue(context):
+            return
+        X_WAest = self.input_port.Eval(context)
+        if X_WAest is None:
+            return
+
+        name = f'est_box{self.counter}'
+        self.meshcat_vis.SetObject(
+            name,
+            Box(*[0.05]*3),
+            Rgba(0.0, 0.0, 0.0, 1.0)
+        )
+        self.meshcat_vis.SetTransform(name, X_WAest)
+        self.counter += 1
 
 
 def get_outer_position(args) -> np.array:
@@ -867,6 +899,7 @@ def run_sim(args: SimArgs):
 
     navigation_system = builder.AddSystem(FilterBasedNavigation(args))
     recolorer = builder.AddSystem(SphereRecolorer(meshcat, plant, sphere_names))
+    estimate_vis = builder.AddSystem(NavEstimateVisualizer(meshcat))
 
     plant.Finalize()
 
@@ -896,6 +929,11 @@ def run_sim(args: SimArgs):
     builder.Connect(
         imu_system.GetOutputPort('inertial_measurement'),
         navigation_system.GetInputPort('inertial_measurement'),
+    )
+
+    builder.Connect(
+        navigation_system.GetOutputPort('pose_estimate'),
+        estimate_vis.GetInputPort('pose_estimate'),
     )
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
