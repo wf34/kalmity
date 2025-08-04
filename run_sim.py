@@ -151,7 +151,6 @@ class SimArgs(Tap):
     agent_origin: typing.List[float] = [5, 2.5, 2.5]
     replay_browser: str = 'chromium'
     diagram_destination: str = 'sim_diagram.png'
-    is_normal: bool = True
     with_images: bool = False
     use_real_imu: bool = False
     slam_mode: typing.Literal[ORACLE, FRONT] = ORACLE
@@ -831,57 +830,34 @@ def run_sim(args: SimArgs):
     plant.set_gravity_enabled(dummy_frustum_model, False)
 
     sphere_names = []
-
-    if args.is_normal:
-        for id_ in range(args.spheres_count + args.outer_spheres_count):
-            sphere_names.append(make_sphere_name_from_id(id_))
-            sphere_name = sphere_names[-1]
-            sphere_model =make_sphere(parser, sphere_name)
-            sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
-            if id_ < args.spheres_count:
-                position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
-            else:
-                position = get_outer_position(args)
-            X_WB = RigidTransform(position)
-            plant.WeldFrames(
-                plant.world_frame(),
-                sphere_body.body_frame(),
-                X_WB,
-            )
-            make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
-    else:
-        id_ = 1
-        sphere_name = make_sphere_name_from_id(id_)
-        sphere_names.append(sphere_name)
-        sphere_model = make_sphere(parser, sphere_name)
+    for id_ in range(args.spheres_count + args.outer_spheres_count):
+        sphere_names.append(make_sphere_name_from_id(id_))
+        sphere_name = sphere_names[-1]
+        sphere_model =make_sphere(parser, sphere_name)
         sphere_body = plant.GetBodyByName('sphere_base', sphere_model)
-        t_Obj_W = np.array(args.agent_origin) + [0, 1, 0]
-        X_WB = RigidTransform(t_Obj_W)
+        if id_ < args.spheres_count:
+            position = np.random.uniform(low=args.volume[0, :], high=args.volume[1, :])
+        else:
+            position = get_outer_position(args)
+        X_WB = RigidTransform(position)
         plant.WeldFrames(
-                plant.world_frame(),
-                sphere_body.body_frame(),
-                X_WB,
+            plant.world_frame(),
+            sphere_body.body_frame(),
+            X_WB,
         )
         make_sphere_passive_vis(meshcat, sphere_name, meshcat, X_WB)
 
-    if args.is_normal:
-        R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
-        R_WL1 = RotationMatrix.Identity()
-        t_L_W = args.agent_origin
-        X_WL1 = RigidTransform(R_WL1, t_L_W)
-        X_WL2 = RigidTransform(R_WL2, t_L_W)
+    R_WL2 = RotationMatrix.MakeYRotation(np.radians(-15.)).multiply(RotationMatrix.MakeXRotation(np.radians(10.)))
+    R_WL1 = RotationMatrix.Identity()
+    t_L_W = args.agent_origin
+    X_WL1 = RigidTransform(R_WL1, t_L_W)
+    X_WL2 = RigidTransform(R_WL2, t_L_W)
 
-        t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, args.agent_span)
-        r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
-        t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
-        visualize_trajectory_with_cylinders(meshcat, positions)
+    t_flat, _ = make_figure8_translational_trajectory(args.experiment_duration, X_WL1, args.agent_span)
+    r = make_circular_roto_trajectory(args.experiment_duration, t_flat)
+    t, positions = make_figure8_translational_trajectory(args.experiment_duration, X_WL2, args.agent_span)
+    visualize_trajectory_with_cylinders(meshcat, positions)
 
-    else:
-        R_WL1 = RotationMatrix.Identity()
-        t_L_W = args.agent_origin
-        X_WL1 = RigidTransform(R_WL1, t_L_W)
-        t = make_dummy_translational_trajectory(args.experiment_duration, X_WL1)
-        r = make_dummy_roto_trajectory(args.experiment_duration)
 
     imu_system = add_imu_sensor(args, builder, plant, gt_frustum_body, t, r)
 
