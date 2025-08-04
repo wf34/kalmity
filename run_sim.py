@@ -48,7 +48,6 @@ from pydrake.all import (
     RgbdSensor,
     RenderCameraCore,
     ColorRenderCamera,
-    Box,
     Cylinder,
     DepthRenderCamera,
     DepthRange,
@@ -252,10 +251,10 @@ def calculate_rect_frustum_inertia(mass, bottom_width, top_width, aspect_ratio, 
            c * (bw**2 + bw*tw + tw**2 + bh**2 + bh*th + th**2)
 
 
-def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ratio = 1.777, hfov=None):
+def make_frustum(parser, id_='slam_agent', color=[0.2, 0.2, 0.8, 1.0], aspect_ratio = 1.777, mass = 1., hfov=None):
     if hfov is None:
         raise Exception('unreachable')
-    mass = 1.
+
     bottom_width = .2
     top_width = .02
     height = bottom_width / (2 * math.tan(hfov / 2.))
@@ -469,12 +468,12 @@ class FrustumMover(LeafSystem):
         self.plant_context = None
         self.body = body
 
-        self.DeclareVectorInputPort('commanded_translation', 3)
-        self.DeclareVectorInputPort('commanded_orientation', 4)
+        self.input_port_t = self.DeclareVectorInputPort('translation', 3)
+        self.input_port_q = self.DeclareVectorInputPort('orientation', 4)
 
         self.DeclareContinuousState(1)
 
-    def Initialize(self, plant_context):
+    def initialize(self, plant_context):
         self.plant_context = plant_context
 
     def DoCalcTimeDerivatives(self, context, derivatives):
@@ -482,8 +481,8 @@ class FrustumMover(LeafSystem):
             derivatives.get_mutable_vector().SetFromVector([0.0])
             return
 
-        t = self.GetInputPort('commanded_translation').Eval(context)
-        q = Quaternion(*self.GetInputPort('commanded_orientation').Eval(context))
+        t = self.input_port_t.Eval(context)
+        q = Quaternion(*self.input_port_q.Eval(context))
         X_WO = RigidTransform(q, t)
         self.plant.SetFreeBodyPose(self.plant_context, self.body, X_WO)
         derivatives.get_mutable_vector().SetFromVector([1.0])
@@ -677,8 +676,6 @@ class FilterBasedNavigation(LeafSystem):
         last_pose_time, X_WAest = self.pose_estimate
         if last_pose_time is None or X_WAest is None:
             return
-        now = context.get_time()
-        print(f'set_pose_estimate/ now: {now:.3f}, estimate\'s time: {last_pose_time:.3f}')
         output.set_value(X_WAest)
 
     def store_pose_estimate(self, timestamp_and_slam_pose_estimate: typing.List[float]):
@@ -762,33 +759,27 @@ class SphereRecolorer(LeafSystem):
             self.change_vis_property(now, False, unseen_model_name)
 
 
-class NavEstimateVisualizer(LeafSystem):
-    def __init__(self, meshcat):
+class RigidTransformDemuxer(LeafSystem):
+    def __init__(self):
         LeafSystem.__init__(self)
-        self.meshcat_vis = meshcat
-        self.counter = 0
+        self.input_port = self.DeclareAbstractInputPort("pose_estimate", AbstractValue.Make(RigidTransform()))
+        self.DeclareVectorOutputPort("estimate_quaternion", 4, self.calc_quaternion)
+        self.DeclareVectorOutputPort("estimate_translation", 3, self.calc_translation)
 
-        self.input_port = self.DeclareAbstractInputPort(
-            'pose_estimate',
-            AbstractValue.Make(RigidTransform())
-        )
-        self.DeclarePerStepUnrestrictedUpdateEvent(self.process_nav_estimate)
-
-    def process_nav_estimate(self, context, state):
+    def calc_quaternion(self, context, output):
         if not self.input_port.HasValue(context):
             return
-        X_WAest = self.input_port.Eval(context)
-        if X_WAest is None:
+        X = self.input_port.Eval(context)
+        if X is None:
             return
+        q = X.rotation().ToQuaternion()
+        output.SetFromVector([q.w(), q.x(), q.y(), q.z()])
 
-        name = f'est_box{self.counter}'
-        self.meshcat_vis.SetObject(
-            name,
-            Box(*[0.05]*3),
-            Rgba(0.0, 0.0, 0.0, 1.0)
-        )
-        self.meshcat_vis.SetTransform(name, X_WAest)
-        self.counter += 1
+    def calc_translation(self, context, output):
+        if not self.input_port.HasValue(context):
+            return
+        X = self.input_port.Eval(context)
+        output.SetFromVector(X.translation())
 
 
 def get_outer_position(args) -> np.array:
@@ -821,9 +812,13 @@ def run_sim(args: SimArgs):
     aspect_ratio = 1.777
     hfov = np.radians(80.)
 
-    frustum_model = make_frustum(parser, aspect_ratio=aspect_ratio, hfov=hfov)
-    frustum_body = plant.GetBodyByName('base_link', frustum_model)
-    agents_body_frame_id = plant.GetBodyFrameIdOrThrow(frustum_body.index())
+    gt_frustum_model = make_frustum(parser, id_='slam_agent', aspect_ratio=aspect_ratio, hfov=hfov, color=[0.2, 0.2, 0.8, 0.8], mass=1.)
+    dummy_frustum_model = make_frustum(parser, id_='slam_est_agent', aspect_ratio=aspect_ratio, hfov=hfov, color=[0.8, 0.2, 0.2, 1.0], mass=1.e-3)
+
+    gt_frustum_body = plant.GetBodyByName('base_link', gt_frustum_model)
+    dummy_frustum_body = plant.GetBodyByName('base_link', dummy_frustum_model)
+
+    agents_body_frame_id = plant.GetBodyFrameIdOrThrow(gt_frustum_body.index())
     camera = make_camera(scene_graph, camera_name, agents_body_frame_id, aspect_ratio, hfov)
 
     camera_system = builder.AddSystem(camera)
@@ -832,7 +827,8 @@ def run_sim(args: SimArgs):
         camera.query_object_input_port()
     )
 
-    plant.set_gravity_enabled(frustum_model, False)
+    plant.set_gravity_enabled(gt_frustum_model, False)
+    plant.set_gravity_enabled(dummy_frustum_model, False)
 
     sphere_names = []
 
@@ -887,30 +883,31 @@ def run_sim(args: SimArgs):
         t = make_dummy_translational_trajectory(args.experiment_duration, X_WL1)
         r = make_dummy_roto_trajectory(args.experiment_duration)
 
-    imu_system = add_imu_sensor(args, builder, plant, frustum_body, t, r)
+    imu_system = add_imu_sensor(args, builder, plant, gt_frustum_body, t, r)
 
     tr_trajectory_source = builder.AddSystem(TrajectorySource(t))
     ro_trajectory_source = builder.AddSystem(TrajectorySource(r))
 
-    frustum_mover = builder.AddSystem(FrustumMover(plant, frustum_body))
+    gt_frustum_mover = builder.AddSystem(FrustumMover(plant, gt_frustum_body))
 
     visual_observer = builder.AddSystem(VisualObserver(
-        args, plant, sphere_names, frustum_model, camera))
+        args, plant, sphere_names, gt_frustum_model, camera))
 
     navigation_system = builder.AddSystem(FilterBasedNavigation(args))
     recolorer = builder.AddSystem(SphereRecolorer(meshcat, plant, sphere_names))
-    estimate_vis = builder.AddSystem(NavEstimateVisualizer(meshcat))
+    demux = builder.AddSystem(RigidTransformDemuxer())
+    dummy_frustum_mover = builder.AddSystem(FrustumMover(plant, dummy_frustum_body))
 
     plant.Finalize()
 
     builder.Connect(
         tr_trajectory_source.get_output_port(0),
-        frustum_mover.GetInputPort('commanded_translation'),
+        gt_frustum_mover.GetInputPort('translation'),
     )
 
     builder.Connect(
         ro_trajectory_source.get_output_port(0),
-        frustum_mover.GetInputPort('commanded_orientation'),
+        gt_frustum_mover.GetInputPort('orientation'),
     )
 
     builder.Connect(
@@ -933,7 +930,16 @@ def run_sim(args: SimArgs):
 
     builder.Connect(
         navigation_system.GetOutputPort('pose_estimate'),
-        estimate_vis.GetInputPort('pose_estimate'),
+        demux.GetInputPort('pose_estimate'),
+    )
+
+    builder.Connect(
+        demux.GetOutputPort('estimate_quaternion'),
+        dummy_frustum_mover.GetInputPort('orientation'),
+    )
+    builder.Connect(
+        demux.GetOutputPort('estimate_translation'),
+        dummy_frustum_mover.GetInputPort('translation'),
     )
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
@@ -946,7 +952,8 @@ def run_sim(args: SimArgs):
     meshcat.StartRecording(set_visualizations_while_recording=True)
 
     plant_context = diagram.GetMutableSubsystemContext(plant, simulator.get_mutable_context())
-    frustum_mover.Initialize(plant_context)
+    gt_frustum_mover.initialize(plant_context)
+    dummy_frustum_mover.initialize(plant_context)
     camera_context = diagram.GetMutableSubsystemContext(camera_system, simulator.get_mutable_context())
     visual_observer.initialize(camera_context)
 
