@@ -8,10 +8,12 @@ use pyo3::types::PyTuple;
 
 pub mod oracle;
 pub mod measurement;
+mod ikf;
 pub mod front;
 
 use crate::oracle::GtObservation;
 use crate::measurement::InertialMeasurement;
+use ikf::Filter;
 
 const SEED: u8 = 34;
 const SEED_N: usize = 32;
@@ -21,7 +23,8 @@ struct Runtime {
     rng: StdRng,
     label: String,
     pose_callback: Option<PyObject>,
-    ptime: Option<f32>,
+    ptime: Option<f32>,  // TODO remove
+    pose_estimator: Filter,
 }
 
 #[pymethods]
@@ -94,7 +97,8 @@ impl Runtime {
         Runtime{rng: StdRng::from_seed([SEED; SEED_N]),
                 label: label,
                 pose_callback: None,
-                ptime: None}
+                ptime: None,
+                pose_estimator: Filter::new()}
     }
 }
 
