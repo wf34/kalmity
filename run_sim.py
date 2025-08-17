@@ -682,7 +682,7 @@ class FilterBasedNavigation(LeafSystem):
         timestamp = timestamp_and_slam_pose_estimate[0]
         slam_pose_estimate = timestamp_and_slam_pose_estimate[1:]
         q = slam_pose_estimate[:4]
-        qq = Quaternion(w=q[0], x=q[1], y=q[2], z=q[3])
+        qq = Quaternion(w=q[3], x=q[0], y=q[1], z=q[2])
         t = slam_pose_estimate[-3:]
         self.pose_buffer.append((timestamp, RigidTransform(qq, t)))
 
