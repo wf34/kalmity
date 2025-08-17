@@ -42,6 +42,8 @@ impl NomState {
                  gravity: Vector3::<f64>::zeros(),
         }
     }
+
+    fn propagate()
 }
 
 impl ErrState {
@@ -85,6 +87,13 @@ impl Filter {
 
         let (Some(_nom), Some(_err)) = (&mut self.nom, &mut self.err) else {
             panic!("`propagate` was called on the uninited `Filter`");
+        };
+
+        let Some(prev_time) = self.prop_time {
+            let delta_t: f64 = timestamp - prev_time;
+
+            _nom.propagate(delta_t, a_m, omega_m);
+            _err.propagate(delta_t, a_m, omega_m, _nom.a_bias, _nom.omaga_bias);
         };
 
         self.prop_time = Some(timestamp);
