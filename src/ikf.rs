@@ -75,11 +75,29 @@ impl Filter {
         }
     }
 
-    fn init(&mut self) {}
-    pub fn propagate(&mut self, timestamp: f32, a_m: Vector3<f32>, omega_m: Vector3<f32>) {
+    pub fn is_inited(& self) -> bool {
+        assert!(self.prop_time.is_none() || (self.nom.is_some() && self.err.is_some()));
+        self.prop_time.is_some()
     }
 
-    pub fn get_estimate() -> Option<PoseEstimate> {
-        None
+    pub fn propagate(&mut self, timestamp: f64, a_m: Vector3<f64>, omega_m: Vector3<f64>) {
+        assert!(self.prop_time.is_none() || self.prop_time.unwrap() < timestamp);
+
+        let (Some(_nom), Some(_err)) = (&mut self.nom, &mut self.err) else {
+            panic!("`propagate` was called on the uninited `Filter`");
+        };
+
+        self.prop_time = Some(timestamp);
+        assert_eq!(_nom.q.norm(), 1.0);
+    }
+
+    pub fn get_estimate(& self) -> Option<PoseEstimate> {
+        let (Some(_prop_time), Some(_nom), Some(_err)) = (self.prop_time, &self.nom, &self.err) else {
+            return None
+        };
+
+        Some(PoseEstimate{timestamp: _prop_time,
+                          q: _nom.q,
+                          p: _nom.p})
     }
 }
