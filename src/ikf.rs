@@ -3,55 +3,66 @@ extern crate nalgebra as na;
 use na::{Vector3, Quaternion};
 
 struct NomState {
-    p: Vector3<f32>,
-    v: Vector3<f32>,
-    q: Quaternion<f32>,
-    a_bias: Vector3<f32>,
-    omega_bias: Vector3<f32>,
-    gravity: Vector3<f32>,
+    p: Vector3<f64>,
+    v: Vector3<f64>,
+    q: Quaternion<f64>,
+    a_bias: Vector3<f64>,
+    omega_bias: Vector3<f64>,
+    gravity: Vector3<f64>,
 }
 
 struct ErrState {
-    dp: Vector3<f32>,
-    dv: Vector3<f32>,
-    dtheta: Vector3<f32>,
-    da_bias: Vector3<f32>,
-    dgravity: Vector3<f32>,
+    delta_p: Vector3<f64>,
+    delta_v: Vector3<f64>,
+    delta_theta: Vector3<f64>,
+    delta_a_bias: Vector3<f64>,
+    delta_gravity: Vector3<f64>,
 }
 
-struct PoseEstimate {
-    timestamp: f32,
-    q: Quaternion<f32>,
-    t: Vector3<f32>,
+pub(crate) struct PoseEstimate {
+    timestamp: f64,
+    q: Quaternion<f64>,
+    p: Vector3<f64>,
 }
 
 pub(crate) struct Filter {
-    prop_time: Option<f32>,
-    upd_time: Option<f32>,
+    prop_time: Option<f64>,
+    upd_time: Option<f64>,
     nom: Option<NomState>,
     err: Option<ErrState>,
 }
 
 impl NomState {
     fn new() -> Self {
-        NomState{p: Vector3::<f32>::zeros(),
-                 v: Vector3::<f32>::zeros(),
-                 q: Quaternion::<f32>::identity(),
-                 a_bias: Vector3::<f32>::zeros(),
-                 omega_bias: Vector3::<f32>::zeros(),
-                 gravity: Vector3::<f32>::zeros(),
+        NomState{p: Vector3::<f64>::zeros(),
+                 v: Vector3::<f64>::zeros(),
+                 q: Quaternion::<f64>::identity(),
+                 a_bias: Vector3::<f64>::zeros(),
+                 omega_bias: Vector3::<f64>::zeros(),
+                 gravity: Vector3::<f64>::zeros(),
         }
     }
 }
 
 impl ErrState {
     fn new() -> Self {
-        ErrState{dp: Vector3::<f32>::zeros(),
-                 dv: Vector3::<f32>::zeros(),
-                 dtheta: Vector3::<f32>::zeros(),
-                 da_bias: Vector3::<f32>::zeros(),
-                 dgravity: Vector3::<f32>::zeros(),
+        ErrState{delta_p: Vector3::<f64>::zeros(),
+                 delta_v: Vector3::<f64>::zeros(),
+                 delta_theta: Vector3::<f64>::zeros(),
+                 delta_a_bias: Vector3::<f64>::zeros(),
+                 delta_gravity: Vector3::<f64>::zeros(),
         }
+    }
+}
+
+impl PoseEstimate {
+    pub fn to_vec(& self) -> Vec<f64> {
+        let mut stack: Vec<f64> = Vec::new();
+        stack.push(self.timestamp);
+        stack.extend(self.q.coords.iter().cloned());
+        stack.extend(self.p.iter().cloned());
+        assert_eq!(8, stack.len());
+        stack
     }
 }
 

@@ -23,7 +23,7 @@ struct Runtime {
     rng: StdRng,
     label: String,
     pose_callback: Option<PyObject>,
-    ptime: Option<f32>,  // TODO remove
+    ptime: Option<f64>,  // TODO remove
     pose_estimator: Filter,
 }
 
