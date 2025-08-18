@@ -24,7 +24,6 @@ struct Runtime {
     rng: StdRng,
     label: String,
     pose_callback: Option<PyObject>,
-    ptime: Option<f64>,  // TODO remove
     pose_estimator: Filter,
 }
 
@@ -67,7 +66,7 @@ impl Runtime {
         let omega = Vector3::<f64>::new(observation.gyroscope.0,
                                         observation.gyroscope.1,
                                         observation.gyroscope.2);
-        self.pose_estimator.propagate(observation.ts, a, omega);
+        self.pose_estimator.propagate(observation.ts, &a, &omega);
         let _ = self.trigger_pose_callback();
     }
 
@@ -82,7 +81,6 @@ impl Runtime {
         Runtime{rng: StdRng::from_seed([SEED; SEED_N]),
                 label: label,
                 pose_callback: None,
-                ptime: None,
                 pose_estimator: Filter::new()}
     }
 }
