@@ -3,6 +3,35 @@ use pyo3::prelude::*;
 const INVALID_FLOAT_ENTRY: f64 = f64::MIN;
 
 #[pyclass]
+#[derive(Clone)]
+pub struct InertialSensorSpec {
+    #[pyo3(get)]
+    pub sigma_a_n: f64,
+    #[pyo3(get)]
+    pub sigma_omega_n: f64,
+    #[pyo3(get)]
+    pub sigma_a_w: f64,
+    #[pyo3(get)]
+    pub sigma_omega_w: f64,
+}
+
+#[pymethods]
+impl InertialSensorSpec {
+    #[new]
+    fn new(an: f64, on: f64, aw: f64, ow: f64) -> Self {
+        assert!(an >= 1.0e-12 && an < 0.1);
+        assert!(on >= 1.0e-12 && on < 0.1);
+        assert!(aw >= 1.0e-12 && aw < 0.1);
+        assert!(ow >= 1.0e-12 && ow < 0.1);
+        Self{sigma_a_n: an,
+             sigma_omega_n: on,
+             sigma_a_w: aw,
+             sigma_omega_w: ow,
+        }
+    }
+}
+
+#[pyclass]
 pub struct InertialMeasurement {
     #[pyo3(get)]
     pub ts : f64,

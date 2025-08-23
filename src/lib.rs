@@ -7,14 +7,14 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::types::PyTuple;
 
-pub mod oracle;
-pub mod measurement;
 mod ikf;
 pub mod front;
+pub mod measurement;
+pub mod oracle;
 
-use crate::oracle::GtObservation;
-use crate::measurement::InertialMeasurement;
 use ikf::Filter;
+use measurement::{InertialMeasurement,InertialSensorSpec};
+use oracle::GtObservation;
 
 const SEED: u8 = 34;
 const SEED_N: usize = 32;
@@ -22,7 +22,6 @@ const SEED_N: usize = 32;
 #[pyclass]
 struct Runtime {
     rng: StdRng,
-    label: String,
     pose_callback: Option<PyObject>,
     pose_estimator: Filter,
 }
@@ -57,7 +56,7 @@ impl Runtime {
 
     fn add_inertial_measurement(&mut self, observation: &InertialMeasurement) {
         if !self.pose_estimator.is_inited()  {
-           println!("{0} got IMU at {1}", self.label, observation.ts);
+           println!("Runtime got IMU at {}", observation.ts);
         }
 
         let a = Vector3::<f64>::new(observation.acceleration.0,
@@ -76,12 +75,11 @@ impl Runtime {
     }
 
     #[new]
-    fn new(label: String) -> Self {
-        println!("creates kalmity runtime {label}");
+    fn new(imu_spec: &InertialSensorSpec) -> Self {
+        println!("creates kalmity runtime");
         Runtime{rng: StdRng::from_seed([SEED; SEED_N]),
-                label: label,
                 pose_callback: None,
-                pose_estimator: Filter::new()}
+                pose_estimator: Filter::new(imu_spec)}
     }
 }
 
@@ -90,5 +88,6 @@ fn kalmity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Runtime>()?;
     m.add_class::<GtObservation>()?;
     m.add_class::<InertialMeasurement>()?;
+    m.add_class::<InertialSensorSpec>()?;
     Ok(())
 }

@@ -14,7 +14,7 @@ import random
 from collections import Counter, deque
 
 import numpy as np
-from kalmity import GtObservation, InertialMeasurement, Runtime
+from kalmity import GtObservation, InertialMeasurement, InertialSensorSpec, Runtime
 
 from pydot import graph_from_dot_data
 from tap import Tap
@@ -162,6 +162,15 @@ class SimArgs(Tap):
 
         if self.slam_mode == FRONT:
             raise Exception('yet unsupported')
+
+        ACCEL_NOISE_DENSITY = 1.e-3  # m / s^2 / sqrt(Hz)
+        GYRO_NOISE_DENSITY = 3.5e-4  # rad / s / sqrt(Hz)
+        ACCEL_BIAS_WALK = 1.e-4  # m / s^3 / sqrt(Hz)
+        GYRO_BIAS_WALK = 5.e-6  # rad / s^2 / sqrt(Hz)
+        self.imu_spec = InertialSensorSpec(an = ACCEL_NOISE_DENSITY,
+                                           on = GYRO_NOISE_DENSITY,
+                                           aw = ACCEL_BIAS_WALK,
+                                           ow = GYRO_BIAS_WALK)
 
 
 def visualize_trajectory_with_cylinders(meshcat_vis, trajectory_points, line_name="trajectory"):
@@ -345,7 +354,7 @@ def add_imu_sensor(args, builder, plant, agents_body, t, r):
         raise Exception('isnt implemented')
 
     else:
-        return builder.AddSystem(ImuSensor(args.use_real_imu, t=t, r=r))
+        return builder.AddSystem(ImuSensor(args.imu_spec, args.use_real_imu, t=t, r=r))
 
 
 def make_dummy_translational_trajectory(duration: float, X_WL: RigidTransform):
@@ -595,8 +604,9 @@ class VisualObserver(LeafSystem):
 
 
 class ImuSensor(LeafSystem):
-    def __init__(self, use_real_imu: bool, gyroscope=None, accelerometer=None, t=None, r=None):
+    def __init__(self, s, use_real_imu: bool, gyroscope=None, accelerometer=None, t=None, r=None):
         LeafSystem.__init__(self)
+        self.spec = s
         if use_real_imu:
             assert gyroscope is not None
             assert accelerometer is not None
@@ -639,7 +649,7 @@ class FilterBasedNavigation(LeafSystem):
         self.pose_estimate = None, None
         self.pose_buffer = deque(maxlen=100)
 
-        self.filter_runtime = Runtime('xx')
+        self.filter_runtime = Runtime(args.imu_spec)
         self.filter_runtime.set_pose_callback(self.store_pose_estimate)
 
         self.vis_obs_port = self.DeclareAbstractInputPort(

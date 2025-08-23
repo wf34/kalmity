@@ -2,7 +2,7 @@
 extern crate nalgebra as na;
 use na::{Vector3, Quaternion, UnitQuaternion};
 use approx::assert_relative_eq;
-
+use crate::measurement::InertialSensorSpec;
 
 #[derive(Clone)]
 struct NomState {
@@ -34,6 +34,7 @@ pub(crate) struct Filter {
     upd_time: Option<f64>,
     nom: Option<NomState>,
     err: Option<ErrState>,
+    imu_spec: InertialSensorSpec,
 }
 
 impl NomState {
@@ -103,11 +104,12 @@ impl PoseEstimate {
 }
 
 impl Filter {
-    pub fn new() -> Self {
+    pub fn new(ispec: &InertialSensorSpec) -> Self {
         Filter{prop_time: None,
                upd_time: None,
                nom: Some(NomState::new()),
                err: Some(ErrState::new()),
+               imu_spec: ispec.clone(),
         }
     }
 
